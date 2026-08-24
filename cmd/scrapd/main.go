@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -26,10 +27,30 @@ func run() error {
 	if address == "" {
 		address = "127.0.0.1:8484"
 	}
+	dataDir := os.Getenv("SCRAPD_DATA_DIR")
+	if dataDir == "" {
+		userConfigDir, err := os.UserConfigDir()
+		if err != nil {
+			return fmt.Errorf("resolve data dir: %w", err)
+		}
+		dataDir = filepath.Join(userConfigDir, "scrapd")
+	}
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		return fmt.Errorf("create data dir: %w", err)
+	}
+
+	apiServer, err := server.New(server.Config{
+		DataDir: dataDir,
+		Token:   os.Getenv("SCRAPD_TOKEN"),
+	})
+	if err != nil {
+		return err
+	}
+	defer apiServer.Close()
 
 	httpServer := &http.Server{
 		Addr:              address,
-		Handler:           server.New(),
+		Handler:           apiServer.Handler(),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 

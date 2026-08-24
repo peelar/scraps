@@ -166,16 +166,19 @@ func (m *Manager) clone(ctx context.Context, repoURL, dir string) error {
 	return nil
 }
 
+// ErrInvalidRepoURL is returned for repository URLs that are not http(s).
+var ErrInvalidRepoURL = errors.New("invalid repo url")
+
 func validateRepoURL(raw string) error {
 	parsed, err := url.Parse(raw)
 	if err != nil {
-		return fmt.Errorf("invalid repo url: %w", err)
+		return fmt.Errorf("%w: %w", ErrInvalidRepoURL, err)
 	}
 	if parsed.Scheme != "http" && parsed.Scheme != "https" {
-		return fmt.Errorf("invalid repo url: scheme must be http or https, got %q", parsed.Scheme)
+		return fmt.Errorf("%w: scheme must be http or https, got %q", ErrInvalidRepoURL, parsed.Scheme)
 	}
 	if parsed.Host == "" {
-		return errors.New("invalid repo url: missing host")
+		return fmt.Errorf("%w: missing host", ErrInvalidRepoURL)
 	}
 	return nil
 }
