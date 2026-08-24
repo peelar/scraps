@@ -1,0 +1,14 @@
+{
+  "name": "scraps",
+  "version": "0.0.0",
+  "private": true,
+  "packageManager": "pnpm@10.34.5",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "check": "pnpm --recursive check",
+    "test": "pnpm --recursive test"
+  }
+}
+
