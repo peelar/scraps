@@ -12,8 +12,8 @@ type FakeDaemon = {
 };
 
 /**
- * A minimal scrapd double speaking the API surface from ADR 0001: fs routes
- * with base64 bodies, workspace lifecycle, and NDJSON streaming exec.
+ * A minimal scrapd double speaking the ADR 0002 API: /files routes with
+ * base64 bodies, type-keyed NDJSON exec events, and nested error objects.
  */
 async function startFakeDaemon(): Promise<FakeDaemon> {
 	const files = new Map<string, Buffer>();
@@ -23,78 +23,95 @@ async function startFakeDaemon(): Promise<FakeDaemon> {
 		request.on("data", (chunk: Buffer) => chunks.push(chunk));
 		request.on("end", () => {
 			const body = chunks.length > 0 ? (JSON.parse(Buffer.concat(chunks).toString()) as never) : {};
-			const respond = (status: number, payload?: unknown) => {
-				if (payload === undefined) {
-					response.writeHead(status);
-					response.end();
-					return;
-				}
+			const apiError = (status: number, code: string, message: string) => {
 				response.writeHead(status, { "Content-Type": "application/json" });
-				response.end(JSON.stringify(payload));
+				response.end(JSON.stringify({ error: { code, message } }));
 			};
 			const route = `${request.method} ${request.url}`;
 
 			if (route === "GET /v1/workspaces/ws-1") {
-				respond(200, {
-					id: "ws-1",
-					project: "owner/project",
-					status: "running",
-					root: "/work/project",
-				});
+				response.writeHead(200, { "Content-Type": "application/json" });
+				response.end(
+					JSON.stringify({
+						id: "ws-1",
+						project: "owner/project",
+						state: "running",
+						rootPath: "/srv/workspaces/ws-1",
+					}),
+				);
 				return;
 			}
 
-			if (route === "POST /v1/workspaces/ws-1/fs/write") {
+			if (route === "POST /v1/workspaces/ws-1/files/write") {
 				const input = body as { path: string; content: string };
 				files.set(input.path, Buffer.from(input.content, "base64"));
-				respond(204);
+				response.writeHead(200, { "Content-Type": "application/json" });
+				response.end(JSON.stringify({ size: files.get(input.path)?.byteLength ?? 0 }));
 				return;
 			}
 
-			if (route === "POST /v1/workspaces/ws-1/fs/read") {
+			if (route === "POST /v1/workspaces/ws-1/files/read") {
 				const input = body as { path: string };
 				const content = files.get(input.path);
 				if (content === undefined) {
-					respond(404, { error: `no such file: ${input.path}` });
+					apiError(404, "not_found", `no such file: ${input.path}`);
 					return;
 				}
-				respond(200, { content: content.toString("base64") });
+				response.writeHead(200, { "Content-Type": "application/json" });
+				response.end(JSON.stringify({ content: content.toString("base64"), size: content.byteLength }));
 				return;
 			}
 
-			if (route === "POST /v1/workspaces/ws-1/fs/stat") {
-				const input = body as { path: string };
-				respond(200, { directory: input.path.endsWith("/") || !input.path.includes(".") });
+			if (route === "POST /v1/workspaces/ws-1/files/glob") {
+				const input = body as { pattern: string };
+				const hits = [...files.keys()].filter((path) => path.endsWith(input.pattern.replace(/\*/g, "")));
+				response.writeHead(200, { "Content-Type": "application/json" });
+				response.end(JSON.stringify({ paths: hits }));
+				return;
+			}
+
+			if (route === "POST /v1/workspaces/ws-1/files/grep") {
+				const input = body as { pattern: string };
+				const matches = [...files.entries()]
+					.filter(([, content]) => content.toString("utf8").includes(input.pattern))
+					.map(([path, content]) => ({
+						path,
+						lineNumber: 1,
+						lineText: content.toString("utf8").split("\n")[0] ?? "",
+						lines: [],
+					}));
+				response.writeHead(200, { "Content-Type": "application/json" });
+				response.end(JSON.stringify({ matches, limitReached: false }));
 				return;
 			}
 
 			if (route.startsWith("POST /v1/workspaces/") && route.endsWith("/exec")) {
-				const input = body as { command: string };
 				const workspaceId = request.url?.split("/")[3] ?? "";
 				if (workspaceId === "ws-hang") {
 					// Never sends an exit event; used for timeout/abort tests.
 					response.writeHead(200, { "Content-Type": "application/x-ndjson" });
-					response.write(`${JSON.stringify({ event: "start", pid: 1 })}\n`);
+					response.write(`${JSON.stringify({ type: "start", pid: 1 })}\n`);
 					// Keep the connection open without ending the stream.
 					return;
 				}
+				const input = body as { command: string };
 				response.writeHead(200, { "Content-Type": "application/x-ndjson" });
 				const line = (event: unknown) => response.write(`${JSON.stringify(event)}\n`);
-				line({ event: "start", pid: 4242 });
+				line({ type: "start", pid: 4242 });
 				// Exercise multi-chunk streaming: split the base64 payload at a
 				// 4-character boundary so each chunk decodes independently.
 				const out = `ran: ${input.command}\n`;
 				const b64 = Buffer.from(out).toString("base64");
 				const mid = Math.max(4, Math.floor(b64.length / 8) * 4);
-				line({ event: "data", stream: "stdout", data: b64.slice(0, mid) });
-				line({ event: "data", stream: "stdout", data: b64.slice(mid) });
-				line({ event: "data", stream: "stderr", data: Buffer.from("warn\n").toString("base64") });
-				response.write(JSON.stringify({ event: "exit", code: 3, signal: null }) + "\n");
+				line({ type: "output", stream: "stdout", data: b64.slice(0, mid) });
+				line({ type: "output", stream: "stdout", data: b64.slice(mid) });
+				line({ type: "output", stream: "stderr", data: Buffer.from("warn\n").toString("base64") });
+				response.write(JSON.stringify({ type: "exit", code: 3, durationMs: 12 }) + "\n");
 				response.end();
 				return;
 			}
 
-			respond(404, { error: `no route: ${route}` });
+			apiError(404, "not_found", `no route: ${route}`);
 		});
 	});
 
@@ -122,8 +139,8 @@ describe("ScrapdClient", () => {
 			const client = new ScrapdClient(daemon.url);
 			const workspace = await client.getWorkspace("ws-1");
 			assert.equal(workspace.id, "ws-1");
-			assert.equal(workspace.root, "/work/project");
-			assert.equal(workspace.status, "running");
+			assert.equal(workspace.rootPath, "/srv/workspaces/ws-1");
+			assert.equal(workspace.state, "running");
 		} finally {
 			await daemon.close();
 		}
@@ -134,24 +151,25 @@ describe("ScrapdClient", () => {
 		try {
 			const client = new ScrapdClient(daemon.url);
 			const bytes = Buffer.from([0x00, 0x01, 0xfe, 0xff, 0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a]);
-			await client.writeFile("ws-1", "/work/project/logo.bin", bytes);
-			const readBack = await client.readFile("ws-1", "/work/project/logo.bin");
+			await client.writeFile("ws-1", "/srv/workspaces/ws-1/logo.bin", bytes);
+			const readBack = await client.readFile("ws-1", "/srv/workspaces/ws-1/logo.bin");
 			assert.deepEqual(readBack, bytes);
 		} finally {
 			await daemon.close();
 		}
 	});
 
-	it("surfaces API errors with status and message", async () => {
+	it("surfaces API errors with status, code, and message", async () => {
 		const daemon = await startFakeDaemon();
 		try {
 			const client = new ScrapdClient(daemon.url);
 			try {
-				await client.readFile("ws-1", "/work/project/missing.txt");
+				await client.readFile("ws-1", "/srv/workspaces/ws-1/missing.txt");
 				assert.fail("expected failure");
 			} catch (error) {
 				assert.ok(error instanceof ScrapdApiError);
 				assert.equal(error.status, 404);
+				assert.equal(error.code, "not_found");
 				assert.ok(error.message.includes("missing.txt"));
 			}
 		} finally {
@@ -164,7 +182,7 @@ describe("ScrapdClient", () => {
 		try {
 			const client = new ScrapdClient(daemon.url);
 			const chunks: { data: string; stream: string }[] = [];
-			const result = await client.exec("ws-1", "make test", "/work/project", {
+			const result = await client.exec("ws-1", "make test", "/srv/workspaces/ws-1", {
 				onData: (chunk, stream) => chunks.push({ data: chunk.toString("utf8"), stream }),
 			});
 
@@ -183,13 +201,13 @@ describe("ScrapdClient", () => {
 		}
 	});
 
-	it("reports timeouts for streams that never exit", async () => {
+	it("translates server-side timeout exits to the local tool's message", async () => {
 		const daemon = await startFakeDaemon();
 		try {
 			const client = new ScrapdClient(daemon.url);
 			await assert.rejects(
 				() =>
-					client.exec("ws-hang", "sleep forever", "/work/project", {
+					client.exec("ws-hang", "sleep forever", "/srv/workspaces/ws-1", {
 						onData: () => {},
 						timeout: 1,
 					}),
@@ -205,7 +223,7 @@ describe("ScrapdClient", () => {
 		try {
 			const client = new ScrapdClient(daemon.url);
 			const controller = new AbortController();
-			const pending = client.exec("ws-hang", "sleep forever", "/work/project", {
+			const pending = client.exec("ws-hang", "sleep forever", "/srv/workspaces/ws-1", {
 				onData: () => {},
 				signal: controller.signal,
 			});
@@ -214,6 +232,39 @@ describe("ScrapdClient", () => {
 				() => pending,
 				(error: unknown) => error instanceof Error && error.message === "aborted",
 			);
+		} finally {
+			await daemon.close();
+		}
+	});
+
+	it("sends the bearer token when configured", async () => {
+		const daemon = await startFakeDaemon();
+		try {
+			// The fake daemon ignores auth; assert the header is present.
+			let sawHeader = false;
+			daemon.server.on("request", (request) => {
+				if (request.headers.authorization === "Bearer secret") {
+					sawHeader = true;
+				}
+			});
+			const client = new ScrapdClient(daemon.url, "secret");
+			await client.getWorkspace("ws-1");
+			assert.ok(sawHeader);
+		} finally {
+			await daemon.close();
+		}
+	});
+
+	it("queries glob and grep endpoints", async () => {
+		const daemon = await startFakeDaemon();
+		try {
+			const client = new ScrapdClient(daemon.url);
+			await client.writeFile("ws-1", "/srv/workspaces/ws-1/src/a.ts", "hello world\n");
+			const paths = await client.glob("ws-1", { pattern: "*.ts", path: "/srv/workspaces/ws-1" });
+			assert.ok(paths.includes("/srv/workspaces/ws-1/src/a.ts"));
+			const grep = await client.grep("ws-1", { pattern: "hello" });
+			assert.equal(grep.matches.length, 1);
+			assert.equal(grep.matches[0]?.path, "/srv/workspaces/ws-1/src/a.ts");
 		} finally {
 			await daemon.close();
 		}

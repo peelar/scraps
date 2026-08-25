@@ -8,6 +8,8 @@
  * `SCRAP_*` environment variables.
  */
 
+import { DEFAULT_DAEMON_URL } from "./client.ts";
+
 export type RemoteConfig = {
 	/** Base URL of the scrapd control daemon (SCRAP_DAEMON_URL). */
 	readonly daemonUrl: string | undefined;
@@ -41,9 +43,9 @@ function asString(value: unknown): string | undefined {
  * Decide whether this Pi process runs in remote-workspace mode.
  *
  * Remote mode is fail-closed by construction: it is only entered through the
- * explicit `--scrap` flag, and an incomplete configuration (for example a
- * missing daemon URL) still counts as remote so that the replaced tools error
- * visibly instead of silently touching the local machine.
+ * explicit `--scrap` flag, and an unreachable daemon still counts as remote
+ * so that the replaced tools error visibly instead of silently touching the
+ * local machine.
  */
 export function resolveMode(inputs: IdentityInputs): ExtensionMode {
 	if (inputs.flags.scrap !== true) {
@@ -53,7 +55,9 @@ export function resolveMode(inputs: IdentityInputs): ExtensionMode {
 	return {
 		kind: "remote",
 		config: {
-			daemonUrl: asString(inputs.env.SCRAP_DAEMON_URL),
+			// ADR 0002: base URL default http://127.0.0.1:8484; `scrap pi`
+			// always sets SCRAP_DAEMON_URL explicitly.
+			daemonUrl: asString(inputs.env.SCRAP_DAEMON_URL) ?? DEFAULT_DAEMON_URL,
 			workspaceId:
 				asString(inputs.flags.workspace) ?? asString(inputs.env.SCRAP_WORKSPACE_ID),
 			project: asString(inputs.env.SCRAP_PROJECT),

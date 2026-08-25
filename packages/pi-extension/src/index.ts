@@ -25,7 +25,7 @@ import { resolveMode } from "./identity.ts";
 import { createRemoteBashOps } from "./operations.ts";
 import { adaptSystemPrompt } from "./prompt.ts";
 import { statusText } from "./workspace.ts";
-import { registerRemoteTools } from "./tools.ts";
+import { REMOTE_TOOL_NAMES, registerRemoteTools } from "./tools.ts";
 import { WorkspaceSession, describeError } from "./workspace.ts";
 
 const STATUS_KEY = "scrap";
@@ -68,23 +68,21 @@ export default function scrapsExtension(pi: ExtensionAPI): void {
 		session.configure(mode.config);
 		if (!toolsRegistered) {
 			registerRemoteTools(pi, session);
+			// `scrap pi` starts Pi with --no-builtin-tools (ADR 0002) so a
+			// failed extension load leaves no filesystem tools at all. With no
+			// built-ins to override, freshly registered tools are not active
+			// until activated explicitly.
+			const active = pi.getActiveTools();
+			pi.setActiveTools([...new Set([...active, ...REMOTE_TOOL_NAMES])]);
 			toolsRegistered = true;
 		}
 
-		if (ctx.hasUI && mode.config.daemonUrl === undefined) {
-			ctx.ui.notify(
-				"--scrap is active but SCRAP_DAEMON_URL is not set. Remote tools will fail " +
-					"closed until a daemon is configured.",
-				"error",
-			);
-		}
-
-		if (mode.config.workspaceId !== undefined && mode.config.daemonUrl !== undefined) {
+		if (mode.config.workspaceId !== undefined) {
 			try {
 				const workspace = await session.connect();
 				if (ctx.hasUI) {
 					ctx.ui.notify(
-						`Connected to Scraps workspace ${workspace.id} (${workspace.status}).`,
+						`Connected to Scraps workspace ${workspace.id} (${workspace.state}).`,
 						"info",
 					);
 				}
@@ -117,7 +115,7 @@ export default function scrapsExtension(pi: ExtensionAPI): void {
 				project: workspace?.project ?? session.project,
 				daemonUrl,
 				root: session.root,
-				status: workspace?.status ?? "disconnected",
+				status: workspace?.state ?? "disconnected",
 			}),
 		};
 	});

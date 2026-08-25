@@ -24,7 +24,6 @@ function remoteConfig(overrides: Partial<RemoteConfig> = {}): RemoteConfig {
 
 type FakeMethods = {
 	getWorkspace?: (id: string) => Promise<WorkspaceRecord>;
-	createWorkspace?: (project?: string) => Promise<WorkspaceRecord>;
 };
 
 /** A ScrapdClient double exposing only the routes a test needs. */
@@ -45,13 +44,6 @@ describe("WorkspaceSession (fail-closed)", () => {
 		}
 	});
 
-	it("reports a missing daemon URL as misconfiguration, not local mode", () => {
-		const session = new WorkspaceSession();
-		session.configure(remoteConfig({ daemonUrl: undefined }));
-		assert.throws(() => session.requireClient(), ScrapsUnavailableError);
-		assert.equal(statusText(session), "scrap:misconfigured");
-	});
-
 	it("is inert before configure", () => {
 		const session = new WorkspaceSession();
 		assert.equal(session.remoteMode, false);
@@ -65,8 +57,8 @@ describe("WorkspaceSession connection", () => {
 	const record: WorkspaceRecord = {
 		id: "quiet-river",
 		project: "owner/project",
-		status: "running",
-		root: "/work/project",
+		state: "running",
+		rootPath: "/srv/workspaces/quiet-river",
 	};
 
 	it("shows disconnected status before connecting", () => {
@@ -77,7 +69,7 @@ describe("WorkspaceSession connection", () => {
 		assert.equal(session.root, DEFAULT_REMOTE_ROOT);
 	});
 
-	it("connects through the daemon and adopts the remote root", async () => {
+	it("connects through the daemon and adopts the workspace rootPath", async () => {
 		const client = fakeClient({ getWorkspace: async () => record });
 		const session = new WorkspaceSession(() => client);
 		session.configure(remoteConfig());
@@ -86,9 +78,9 @@ describe("WorkspaceSession connection", () => {
 
 		assert.equal(connected.id, "quiet-river");
 		assert.equal(session.connection.status, "connected");
-		assert.equal(session.root, "/work/project");
+		assert.equal(session.root, "/srv/workspaces/quiet-river");
 		assert.equal(statusText(session), "scrap:quiet-river");
-		assert.ok(describeSession(session).includes("Remote root: /work/project"));
+		assert.ok(describeSession(session).includes("Remote root: /srv/workspaces/quiet-river"));
 	});
 
 	it("stays disconnected when the workspace is unknown", async () => {

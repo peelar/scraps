@@ -40,31 +40,46 @@ Built executables are written to `bin/`. Start the development daemon with
 Per [ADR 0001](./docs/adr/0001-local-pi-with-remote-workspace-tools.md), the
 canonical interactive integration runs Pi locally and executes the seven
 project-facing tools (`bash`, `read`, `write`, `edit`, `ls`, `find`, `grep`)
-in a remote Scraps workspace:
+in a remote Scraps workspace. The daemon API is specified in
+[ADR 0002](./docs/adr/0002-scrapd-workspace-api.md).
+
+The convenience launcher resolves or creates a workspace, then starts local
+Pi with the extension (embedded in the `scrap` binary) and fail-closed tool
+replacement:
 
 ```bash
-pi --extension packages/pi-extension/src/index.ts --scrap [--workspace <id>]
+scrapd &                       # or: make dev-daemon
+scrap pi                       # fresh workspace, interactive Pi
+scrap pi "fix the flaky test"  # fresh workspace + opening prompt
+scrap pi --workspace <id>      # attach to an existing workspace
+scrap pi --repo <http-url>     # clone a (public) repo into the workspace
+scrap ls                       # list workspaces
+scrap rm <id>...               # remove workspaces
 ```
 
-`scrap pi [prompt]` will become the convenience launcher for this. While
-`--scrap` is active the tools fail closed — with no reachable workspace they
-error visibly and never fall back to the local machine.
+Set `SCRAP_EXTENSION_PATH` to point `scrap pi` at a source checkout of the
+extension during development. While `--scrap` is active the tools fail
+closed — with no reachable workspace they error visibly and never fall back
+to the local machine.
 
-`packages/pi-extension/scripts/dev-scrapd.mjs` is a stand-in daemon for
-developing the extension until the Go daemon implements the workspace API
-(the endpoint contract lives in `packages/pi-extension/src/client.ts`):
+An LLM-free integration harness for the full extension↔daemon surface lives
+at `packages/pi-extension/scripts/integration.mjs`:
 
 ```bash
-pnpm --filter @scraps/pi-extension dev:scrapd
-SCRAP_DAEMON_URL=http://127.0.0.1:8484 SCRAP_WORKSPACE_ID=dev \
-  pi --extension packages/pi-extension/src/index.ts --scrap
+node packages/pi-extension/scripts/integration.mjs http://127.0.0.1:8484 <workspace-id>
 ```
 
 ## Configuration
 
-`scrapd` currently recognizes:
+`scrapd` recognizes:
 
 - `SCRAPD_LISTEN_ADDR` — HTTP listen address (default `127.0.0.1:8484`)
+- `SCRAPD_DATA_DIR` — data directory for the SQLite store and workspace
+  directories (default `~/.config/scrapd`)
+- `SCRAPD_TOKEN` — when set, all `/v1` requests require
+  `Authorization: Bearer <token>`
 
-The daemon currently exposes `GET /healthz` and `GET /v1/info`. Workspace APIs
-will be added once their state model is implemented.
+`scrap` recognizes `SCRAP_DAEMON_URL` and `SCRAP_TOKEN`. The workspace API
+covers lifecycle (`POST/GET/DELETE /v1/workspaces`), streaming execution
+(`POST /v1/workspaces/{id}/exec`, NDJSON events), and file/search operations
+(`POST /v1/workspaces/{id}/files/{read,write,mkdir,stat,access,readdir,glob,grep}`).

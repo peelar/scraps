@@ -43,11 +43,11 @@ describe("resolveMode", () => {
 		}
 	});
 
-	it("stays remote (fail-closed) even without a daemon URL", () => {
+	it("defaults the daemon URL when the environment is silent (fail-closed)", () => {
 		const mode = resolveMode({ flags: { scrap: true }, env: {} });
 		assert.equal(mode.kind, "remote");
 		if (mode.kind === "remote") {
-			assert.equal(mode.config.daemonUrl, undefined);
+			assert.equal(mode.config.daemonUrl, "http://127.0.0.1:8484");
 			assert.equal(mode.config.workspaceId, undefined);
 		}
 	});

@@ -11,43 +11,234 @@
  * gate: with no connected workspace the operation throws and the tool reports
  * a visible error. Nothing ever falls back to the local machine.
  *
- * Search tools: the built-in `grep` spawns a local ripgrep process, so remote
- * grep runs `rg` inside the workspace through the streaming exec endpoint
- * instead. `find` uses the custom `glob` seam the same way with `fd`. When
- * scrapd grows dedicated search endpoints these can move off exec without
- * touching the tool layer.
+ * Search: the daemon serves glob and grep endpoints (ADR 0002) with
+ * server-side walking; `find` maps to files/glob, and grep is reimplemented
+ * here (Pi's built-in grep spawns a local ripgrep) with output formatted
+ * exactly like the built-in tool.
  */
 
 import {
+	DEFAULT_MAX_BYTES,
 	type BashOperations,
 	type EditOperations,
 	type FindOperations,
 	type LsOperations,
 	type ReadOperations,
 	type WriteOperations,
+	formatSize,
+	truncateHead,
+	truncateLine,
 } from "@earendil-works/pi-coding-agent";
 
+import { type GrepInput, type GrepMatch, type WorkspaceRecord, ScrapdClient } from "./client.ts";
 import { ScrapdApiError } from "./errors.ts";
 import type { WorkspaceSession } from "./workspace.ts";
 
-export type RemoteGrepInput = {
-	readonly pattern: string;
-	readonly path?: string;
-	readonly glob?: string;
-	readonly ignoreCase?: boolean;
-	readonly literal?: boolean;
-	readonly context?: number;
-	readonly limit?: number;
+/** File reads: binary-safe through base64 file transport. */
+export function createRemoteReadOps(session: WorkspaceSession): ReadOperations {
+	return {
+		readFile: (path) => remote(session, (ws, client) => client.readFile(ws.id, path)),
+		access: (path) => remote(session, (ws, client) => client.access(ws.id, path, "read")),
+		detectImageMimeType: async (path) => {
+			const buffer = await remote(session, (ws, client) => client.readFile(ws.id, path));
+			return sniffImageMime(buffer);
+		},
+	};
+}
+
+/** File writes: binary-safe through base64 file transport. */
+export function createRemoteWriteOps(session: WorkspaceSession): WriteOperations {
+	return {
+		writeFile: (path, content) =>
+			remote(session, (ws, client) => client.writeFile(ws.id, path, content)),
+		mkdir: (dir) => remote(session, (ws, client) => client.mkdir(ws.id, dir)),
+	};
+}
+
+/** Edits reuse read + write so Pi's exact-match semantics are preserved. */
+export function createRemoteEditOps(session: WorkspaceSession): EditOperations {
+	return {
+		readFile: (path) => remote(session, (ws, client) => client.readFile(ws.id, path)),
+		writeFile: (path, content) =>
+			remote(session, (ws, client) => client.writeFile(ws.id, path, content)),
+		access: (path) => remote(session, (ws, client) => client.access(ws.id, path, "write")),
+	};
+}
+
+/**
+ * Streaming command execution: output chunks, exit status, timeouts, aborts,
+ * working directory, and environment additions all propagate (ADR 0001).
+ */
+export function createRemoteBashOps(session: WorkspaceSession): BashOperations {
+	return {
+		exec: (command, cwd, options) =>
+			remote(session, (ws, client) =>
+				client.exec(ws.id, command, cwd, {
+					onData: options.onData,
+					...(options.signal === undefined ? {} : { signal: options.signal }),
+					...(options.timeout === undefined ? {} : { timeout: options.timeout }),
+					...(options.env === undefined ? {} : { env: options.env }),
+				}),
+			),
+	};
+}
+
+export function createRemoteLsOps(session: WorkspaceSession): LsOperations {
+	return {
+		exists: (path) =>
+			remote(session, async (ws, client) => {
+				try {
+					return (await client.stat(ws.id, path)).exists;
+				} catch (error) {
+					if (error instanceof ScrapdApiError && error.status === 404) {
+						return false;
+					}
+					throw error;
+				}
+			}),
+		stat: (path) =>
+			remote(session, async (ws, client) => {
+				const entry = await client.stat(ws.id, path);
+				return { isDirectory: () => entry.isDirectory };
+			}),
+		readdir: (path) => remote(session, (ws, client) => client.readdir(ws.id, path)),
+	};
+}
+
+export function createRemoteFindOps(session: WorkspaceSession): FindOperations {
+	return {
+		exists: (path) =>
+			remote(session, async (ws, client) => {
+				try {
+					return (await client.stat(ws.id, path)).exists;
+				} catch (error) {
+					if (error instanceof ScrapdApiError && error.status === 404) {
+						return false;
+					}
+					throw error;
+				}
+			}),
+		// The daemon walks the tree server-side (ignoring .git and
+		// node_modules) and returns absolute paths.
+		glob: (pattern, cwd, options) =>
+			remote(session, (ws, client) =>
+				client.glob(ws.id, {
+					pattern,
+					path: cwd,
+					...(options.limit > 0 ? { limit: options.limit } : {}),
+				}),
+			),
+	};
+}
+
+export type RemoteGrepDetails = {
+	truncation?: ReturnType<typeof truncateHead>;
+	matchLimitReached?: number;
+	linesTruncated?: boolean;
 };
 
-export type RemoteGrepResult = {
+export type RemoteGrepOutput = {
 	readonly text: string;
-	readonly matchLimitReached?: number;
+	readonly details: RemoteGrepDetails | undefined;
 };
 
-/** Single-quote a string for a POSIX shell on the workspace. */
-export function shQuote(value: string): string {
-	return `'${value.replaceAll("'", `'\\''`)}'`;
+const DEFAULT_GREP_LIMIT = 100;
+
+/**
+ * Remote grep via the daemon's search endpoint, formatted exactly like Pi's
+ * built-in tool: `path:line: text` for matches, `path-line- text` for
+ * context, plus the built-in truncation notices.
+ */
+export async function runRemoteGrep(
+	session: WorkspaceSession,
+	input: GrepInput,
+): Promise<RemoteGrepOutput> {
+	const ws = session.requireWorkspace();
+	const client = session.requireClient();
+	const result = await client.grep(ws.id, {
+		...input,
+		// The daemon requires absolute paths; the built-in grep defaults to
+		// the current directory, so resolve like Pi's other path-taking tools.
+		path: resolveRemotePath(input.path, session.root),
+	});
+
+	if (result.matches.length === 0) {
+		return { text: "No matches found", details: undefined };
+	}
+
+	const effectiveLimit = input.limit ?? DEFAULT_GREP_LIMIT;
+	let linesTruncated = false;
+	const outputLines: string[] = [];
+
+	for (const match of result.matches) {
+		const path = relativeToRoot(match.path, session.root);
+		if ((input.context ?? 0) === 0) {
+			const sanitized = match.lineText.replace(/\r\n/g, "\n").replace(/\r/g, "").replace(/\n$/, "");
+			const { text, wasTruncated } = truncateLine(sanitized);
+			if (wasTruncated) {
+				linesTruncated = true;
+			}
+			outputLines.push(`${path}:${match.lineNumber}: ${text}`);
+		} else if (match.lines.length > 0) {
+			for (const line of match.lines) {
+				const { text, wasTruncated } = truncateLine(line.text.replace(/\r/g, ""));
+				if (wasTruncated) {
+					linesTruncated = true;
+				}
+				outputLines.push(
+					line.match ? `${path}:${line.n}: ${text}` : `${path}-${line.n}- ${text}`,
+				);
+			}
+		} else {
+			outputLines.push(`${path}:${match.lineNumber}: ${match.lineText}`);
+		}
+	}
+
+	// Byte truncation only: the match limit already capped rows.
+	const truncation = truncateHead(outputLines.join("\n"), {
+		maxLines: Number.MAX_SAFE_INTEGER,
+	});
+
+	const notices: string[] = [];
+	const details: RemoteGrepDetails = {};
+	if (result.limitReached) {
+		notices.push(
+			`${effectiveLimit} matches limit reached. Use limit=${effectiveLimit * 2} for more, or refine pattern`,
+		);
+		details.matchLimitReached = effectiveLimit;
+	}
+	if (truncation.truncated) {
+		notices.push(`${formatSize(DEFAULT_MAX_BYTES)} limit reached`);
+		details.truncation = truncation;
+	}
+	if (linesTruncated) {
+		notices.push("Some lines truncated. Use read tool to see full lines");
+		details.linesTruncated = true;
+	}
+
+	const text =
+		notices.length > 0 ? `${truncation.content}\n\n[${notices.join(". ")}]` : truncation.content;
+	return { text, details: Object.keys(details).length > 0 ? details : undefined };
+}
+
+/** Render an absolute workspace path relative to the project root. */
+export function relativeToRoot(path: string, root: string): string {
+	const normalizedRoot = root.endsWith("/") ? root : `${root}/`;
+	if (path.startsWith(normalizedRoot)) {
+		return path.slice(normalizedRoot.length);
+	}
+	return path;
+}
+
+/** Resolve a tool path argument (possibly relative or ".") against the root. */
+export function resolveRemotePath(path: string | undefined, root: string): string {
+	if (path === undefined || path === "" || path === ".") {
+		return root;
+	}
+	if (path.startsWith("/")) {
+		return path;
+	}
+	return `${root}/${path}`;
 }
 
 function sniffImageMime(buffer: Buffer): string | null {
@@ -79,177 +270,11 @@ function sniffImageMime(buffer: Buffer): string | null {
 	return null;
 }
 
-/** File reads: binary-safe through base64 file transport. */
-export function createRemoteReadOps(session: WorkspaceSession): ReadOperations {
-	return {
-		readFile: (path) => execOrFail(session, (ws, client) => client.readFile(ws.id, path)),
-		access: (path) => execOrFail(session, (ws, client) => client.access(ws.id, path, "r")),
-		detectImageMimeType: async (path) => {
-			const ws = session.requireWorkspace();
-			const buffer = await session.requireClient().readFile(ws.id, path);
-			return sniffImageMime(buffer);
-		},
-	};
-}
-
-/** File writes: binary-safe through base64 file transport. */
-export function createRemoteWriteOps(session: WorkspaceSession): WriteOperations {
-	return {
-		writeFile: (path, content) =>
-			execOrFail(session, (ws, client) => client.writeFile(ws.id, path, content)),
-		mkdir: (dir) => execOrFail(session, (ws, client) => client.mkdir(ws.id, dir)),
-	};
-}
-
-/** Edits reuse read + write so Pi's exact-match semantics are preserved. */
-export function createRemoteEditOps(session: WorkspaceSession): EditOperations {
-	return {
-		readFile: (path) => execOrFail(session, (ws, client) => client.readFile(ws.id, path)),
-		writeFile: (path, content) =>
-			execOrFail(session, (ws, client) => client.writeFile(ws.id, path, content)),
-		access: (path) => execOrFail(session, (ws, client) => client.access(ws.id, path, "rw")),
-	};
-}
-
-/**
- * Streaming command execution: output chunks, exit status, timeouts, aborts,
- * working directory, and environment additions all propagate (ADR 0001).
- */
-export function createRemoteBashOps(session: WorkspaceSession): BashOperations {
-	return {
-			exec: (command, cwd, options) =>
-				execOrFail(session, (ws, client) =>
-					client.exec(ws.id, command, cwd, {
-						onData: options.onData,
-						...(options.signal === undefined ? {} : { signal: options.signal }),
-						...(options.timeout === undefined ? {} : { timeout: options.timeout }),
-						...(options.env === undefined ? {} : { env: options.env }),
-					}),
-				),
-	};
-}
-
-export function createRemoteLsOps(session: WorkspaceSession): LsOperations {
-	return {
-		exists: (path) =>
-			execOrFail(session, async (ws, client) => {
-				try {
-					await client.stat(ws.id, path);
-					return true;
-				} catch (error) {
-					if (error instanceof ScrapdApiError && error.status === 404) {
-						return false;
-					}
-					throw error;
-				}
-			}),
-		stat: (path) =>
-			execOrFail(session, async (ws, client) => {
-				const entry = await client.stat(ws.id, path);
-				return { isDirectory: () => entry.directory };
-			}),
-		readdir: (path) => execOrFail(session, (ws, client) => client.readdir(ws.id, path)),
-	};
-}
-
-export function createRemoteFindOps(session: WorkspaceSession): FindOperations {
-	return {
-		exists: (path) =>
-			execOrFail(session, async (ws, client) => {
-				try {
-					await client.stat(ws.id, path);
-					return true;
-				} catch (error) {
-					if (error instanceof ScrapdApiError && error.status === 404) {
-						return false;
-					}
-					throw error;
-				}
-			}),
-		glob: (pattern, cwd, options) =>
-			execOrFail(session, async (ws, client) => {
-				const args = ["fd", "--glob", "--color=never", "--hidden", "--type", "f"];
-				for (const ignore of options.ignore) {
-					args.push("--exclude", shQuote(ignore));
-				}
-				if (options.limit > 0) {
-					args.push("--max-results", String(options.limit));
-				}
-				args.push(shQuote(pattern), ".");
-
-				let output = "";
-				const result = await client.exec(ws.id, args.join(" "), cwd, {
-					onData: (chunk) => {
-						output += chunk.toString("utf8");
-					},
-				});
-				if (result.exitCode !== 0) {
-					throw new Error(`remote fd failed with exit code ${result.exitCode}`);
-				}
-				return output
-					.split("\n")
-					.map((line) => line.trim())
-					.filter((line) => line.length > 0);
-			}),
-	};
-}
-
-/** Build the ripgrep command for a remote grep invocation. */
-export function buildGrepCommand(input: RemoteGrepInput): string {
-	const args = ["rg", "--line-number", "--no-heading", "--with-filename", "--color", "never"];
-	if (input.ignoreCase === true) {
-		args.push("--ignore-case");
-	}
-	if (input.literal === true) {
-		args.push("--fixed-strings");
-	}
-	if (input.context !== undefined) {
-		args.push("--context", String(input.context));
-	}
-	if (input.glob !== undefined) {
-		args.push("--glob", shQuote(input.glob));
-	}
-	args.push("--", shQuote(input.pattern), input.path === undefined ? "." : shQuote(input.path));
-	return args.join(" ");
-}
-
-/**
- * Remote grep: run ripgrep inside the workspace and return
- * `path:line:content` output, honoring the match limit like the built-in.
- */
-export async function runRemoteGrep(
+async function remote<T>(
 	session: WorkspaceSession,
-	input: RemoteGrepInput,
-): Promise<RemoteGrepResult> {
-	const ws = session.requireWorkspace();
-	const client = session.requireClient();
-
-	let output = "";
-	const result = await client.exec(ws.id, buildGrepCommand(input), session.root, {
-		onData: (chunk) => {
-			output += chunk.toString("utf8");
-		},
-	});
-
-	// ripgrep exits 1 for "no matches", 2 for real errors.
-	if (result.exitCode !== 0 && result.exitCode !== 1) {
-		throw new Error(`remote rg failed with exit code ${result.exitCode}`);
-	}
-
-	const limit = input.limit ?? 100;
-	const lines = output.split("\n").filter((line) => line.length > 0);
-	if (lines.length > limit) {
-		return {
-			text: lines.slice(0, limit).join("\n"),
-			matchLimitReached: limit,
-		};
-	}
-	return { text: lines.join("\n") };
-}
-
-async function execOrFail<T>(
-	session: WorkspaceSession,
-	operation: (ws: ReturnType<WorkspaceSession["requireWorkspace"]>, client: ReturnType<WorkspaceSession["requireClient"]>) => Promise<T>,
+	operation: (ws: WorkspaceRecord, client: ScrapdClient) => Promise<T>,
 ): Promise<T> {
 	return operation(session.requireWorkspace(), session.requireClient());
 }
+
+export type { GrepInput, GrepMatch };

@@ -1,66 +1,93 @@
 /**
- * HTTP client for the scrapd workspace API.
+ * HTTP client for the scrapd workspace API (ADR 0002).
  *
- * This module is the TypeScript statement of the initial scrapd API surface
- * required by ADR 0001 (follow-up work #2: "Define the authenticated,
- * streaming scrapd workspace API"). The Go daemon does not serve these routes
- * yet; until it does, every call fails and the extension fails closed.
+ * The daemon is the authority for workspace lifecycle, command execution,
+ * files, and search. Conventions:
  *
- * Endpoints:
- *
- *   GET    /v1/info                              daemon identity
- *   GET    /v1/workspaces                        list workspaces
- *   POST   /v1/workspaces                        create { project? }
- *   GET    /v1/workspaces/{id}                   workspace status
- *   POST   /v1/workspaces/{id}/start             start workspace
- *   POST   /v1/workspaces/{id}/stop              stop workspace
- *   DELETE /v1/workspaces/{id}                   delete workspace
- *   POST   /v1/workspaces/{id}/exec              streaming command execution
- *   POST   /v1/workspaces/{id}/fs/read           { path }
- *   POST   /v1/workspaces/{id}/fs/write          { path, content(base64) }
- *   POST   /v1/workspaces/{id}/fs/mkdir          { path }
- *   POST   /v1/workspaces/{id}/fs/access         { path, mode? }
- *   POST   /v1/workspaces/{id}/fs/stat           { path }
- *   POST   /v1/workspaces/{id}/fs/readdir        { path }
- *   GET    /v1/workspaces/{id}/previews          service previews
+ * - Base URL default `http://127.0.0.1:8484`; operations under `/v1`.
+ * - If a token is configured, every request carries
+ *   `Authorization: Bearer <token>`.
+ * - Errors are `{ "error": { "code": "...", "message": "..." } }`.
+ * - File paths are absolute paths on the workspace host; the workspace
+ *   `rootPath` from the daemon defines the path space for Pi's tools.
  *
  * `exec` responses are newline-delimited JSON events:
  *
- *   {"event":"start","pid":1234}
- *   {"event":"data","stream":"stdout","data":"<base64 chunk>"}
- *   {"event":"exit","code":0,"signal":null}
+ *   {"type":"start","pid":1234}
+ *   {"type":"output","stream":"stdout","data":"<base64>"}
+ *   {"type":"exit","code":0,"durationMs":12}
+ *   {"type":"exit","code":null,"reason":"timeout","durationMs":30000}
  *
- * File contents are base64-encoded so binary files round-trip safely.
+ * Closing the request stream is the abort mechanism: the daemon kills the
+ * process group.
  */
 
 import { ScrapdApiError } from "./errors.ts";
 
-export type WorkspaceStatus =
-	| "creating"
-	| "starting"
-	| "running"
-	| "stopped"
-	| "deleting"
-	| "unknown";
-
 export type WorkspaceRecord = {
 	readonly id: string;
 	readonly project?: string;
-	readonly status: WorkspaceStatus;
-	/** Absolute path of the project root inside the workspace. */
-	readonly root?: string;
+	readonly repoUrl?: string;
+	/** Lifecycle state; the directory provider always reports "running". */
+	readonly state: string;
+	/** Absolute project root on the workspace host. */
+	readonly rootPath?: string;
 	readonly createdAt?: string;
+	readonly updatedAt?: string;
 };
 
-export type ServicePreview = {
-	readonly name: string;
-	readonly url: string;
+export type CreateWorkspaceInput = {
+	readonly project?: string;
+	readonly repoUrl?: string;
+};
+
+export type FileStat = {
+	readonly exists: boolean;
+	readonly isDirectory: boolean;
+	readonly size: number;
+	readonly mode: string;
+	readonly modTimeMs: number;
+};
+
+export type GlobInput = {
+	readonly pattern: string;
+	readonly path?: string;
+	readonly limit?: number;
+};
+
+export type GrepLine = {
+	readonly n: number;
+	readonly text: string;
+	readonly match: boolean;
+};
+
+export type GrepMatch = {
+	readonly path: string;
+	readonly lineNumber: number;
+	readonly lineText: string;
+	/** Expanded context lines; empty when context is 0 or omitted. */
+	readonly lines: GrepLine[];
+};
+
+export type GrepInput = {
+	readonly pattern: string;
+	readonly path?: string;
+	readonly glob?: string;
+	readonly ignoreCase?: boolean;
+	readonly literal?: boolean;
+	readonly context?: number;
+	readonly limit?: number;
+};
+
+export type GrepResult = {
+	readonly matches: GrepMatch[];
+	readonly limitReached: boolean;
 };
 
 export type ExecOptions = {
 	/** Receives decoded output chunks as they stream in. */
 	readonly onData: (chunk: Buffer, stream: "stdout" | "stderr") => void;
-	/** Aborts the command when fired. */
+	/** Aborts the command (closing the stream kills the remote process). */
 	readonly signal?: AbortSignal;
 	/** Timeout in seconds; mirrors the local bash tool contract. */
 	readonly timeout?: number;
@@ -69,9 +96,13 @@ export type ExecOptions = {
 };
 
 type ExecEvent =
-	| { event: "start"; pid?: number }
-	| { event: "data"; stream?: "stdout" | "stderr"; data: string }
-	| { event: "exit"; code: number | null; signal?: string | null };
+	| { type: "start"; pid?: number }
+	| { type: "output"; stream?: "stdout" | "stderr"; data: string }
+	| { type: "exit"; code: number | null; reason?: string; durationMs?: number };
+
+type ExitEvent = Extract<ExecEvent, { type: "exit" }>;
+
+export const DEFAULT_DAEMON_URL = "http://127.0.0.1:8484";
 
 export class ScrapdClient {
 	private readonly baseUrl: string;
@@ -94,39 +125,28 @@ export class ScrapdClient {
 		return body.workspaces ?? [];
 	}
 
-	async createWorkspace(project?: string): Promise<WorkspaceRecord> {
-		return this.json("POST", "/v1/workspaces", { project });
+	async createWorkspace(input: CreateWorkspaceInput = {}): Promise<WorkspaceRecord> {
+		return this.json("POST", "/v1/workspaces", {
+			...(input.project === undefined ? {} : { project: input.project }),
+			...(input.repoUrl === undefined ? {} : { repoUrl: input.repoUrl }),
+		});
 	}
 
 	async getWorkspace(id: string): Promise<WorkspaceRecord> {
 		return this.json("GET", `/v1/workspaces/${encodeURIComponent(id)}`);
 	}
 
-	async startWorkspace(id: string): Promise<WorkspaceRecord> {
-		return this.json("POST", `/v1/workspaces/${encodeURIComponent(id)}/start`, {});
-	}
-
-	async stopWorkspace(id: string): Promise<WorkspaceRecord> {
-		return this.json("POST", `/v1/workspaces/${encodeURIComponent(id)}/stop`, {});
-	}
-
 	async deleteWorkspace(id: string): Promise<void> {
 		await this.request("DELETE", `/v1/workspaces/${encodeURIComponent(id)}`);
 	}
 
-	async listPreviews(id: string): Promise<ServicePreview[]> {
-		const body = await this.json<{ previews?: ServicePreview[] }>(
-			"GET",
-			`/v1/workspaces/${encodeURIComponent(id)}/previews`,
-		);
-		return body.previews ?? [];
-	}
-
 	/**
 	 * Execute a command in the workspace, streaming output through `onData`.
-	 * Resolves with the process exit status once the stream ends. The stream
-	 * is raced against explicit timeout/abort rejections because cancelling
-	 * the response body does not reliably interrupt a stalled stream.
+	 * Resolves with the process exit status once the stream ends.
+	 *
+	 * The stream is raced against explicit timeout/abort rejections because
+	 * cancelling the response body does not reliably interrupt a stalled
+	 * stream; closing it also signals the daemon to kill the process group.
 	 */
 	async exec(
 		id: string,
@@ -140,8 +160,8 @@ export class ScrapdClient {
 			{
 				command,
 				cwd,
-				timeout: options.timeout,
-				...(options.env === undefined ? {} : { env: options.env }),
+				...(options.timeout === undefined ? {} : { timeoutMs: options.timeout * 1000 }),
+				...envRecord(options.env),
 			},
 			options.signal,
 		);
@@ -159,8 +179,8 @@ export class ScrapdClient {
 			options.timeout === undefined
 				? undefined
 				: setTimeout(() => {
-					fail?.(new Error(`timeout:${options.timeout}`));
-				}, options.timeout * 1000);
+						fail?.(new Error(`timeout:${options.timeout}`));
+					}, options.timeout * 1000);
 
 		const onAbort = () => {
 			fail?.(new Error("aborted"));
@@ -199,56 +219,64 @@ export class ScrapdClient {
 	async readFile(id: string, path: string): Promise<Buffer> {
 		const body = await this.json<{ content: string }>(
 			"POST",
-			`/v1/workspaces/${encodeURIComponent(id)}/fs/read`,
+			this.filesRoute(id, "read"),
 			{ path },
 		);
 		return Buffer.from(body.content, "base64");
 	}
 
 	async writeFile(id: string, path: string, content: string | Buffer): Promise<void> {
-		await this.request(
-			"POST",
-			`/v1/workspaces/${encodeURIComponent(id)}/fs/write`,
-			{
-				path,
-				content: Buffer.from(content).toString("base64"),
-			},
-		);
+		await this.request("POST", this.filesRoute(id, "write"), {
+			path,
+			content: Buffer.from(content).toString("base64"),
+		});
 	}
 
 	async mkdir(id: string, path: string): Promise<void> {
-		await this.request(
-			"POST",
-			`/v1/workspaces/${encodeURIComponent(id)}/fs/mkdir`,
-			{ path },
-		);
+		await this.request("POST", this.filesRoute(id, "mkdir"), { path });
 	}
 
 	/** Throws ScrapdApiError when the path is missing or not accessible. */
-	async access(id: string, path: string, mode: "r" | "rw" = "r"): Promise<void> {
-		await this.request(
-			"POST",
-			`/v1/workspaces/${encodeURIComponent(id)}/fs/access`,
-			{ path, mode },
-		);
+	async access(id: string, path: string, want: "read" | "write" = "read"): Promise<void> {
+		await this.request("POST", this.filesRoute(id, "access"), { path, want });
 	}
 
-	async stat(id: string, path: string): Promise<{ directory: boolean }> {
-		const body = await this.json<{ directory: boolean }>(
-			"POST",
-			`/v1/workspaces/${encodeURIComponent(id)}/fs/stat`,
-			{ path },
-		);
-		return body;
+	async stat(id: string, path: string): Promise<FileStat> {
+		return this.json("POST", this.filesRoute(id, "stat"), { path });
 	}
 
 	async readdir(id: string, path: string): Promise<string[]> {
 		const body = await this.json<{ entries?: string[] }>(
 			"POST",
-			`/v1/workspaces/${encodeURIComponent(id)}/fs/readdir`,
+			this.filesRoute(id, "readdir"),
 			{ path },
 		);
 		return body.entries ?? [];
+	}
+
+	async glob(id: string, input: GlobInput): Promise<string[]> {
+		const body = await this.json<{ paths?: string[] }>("POST", this.filesRoute(id, "glob"), {
+			pattern: input.pattern,
+			...(input.path === undefined ? {} : { path: input.path }),
+			...(input.limit === undefined ? {} : { limit: input.limit }),
+		});
+		return body.paths ?? [];
+	}
+
+	async grep(id: string, input: GrepInput): Promise<GrepResult> {
+		return this.json("POST", this.filesRoute(id, "grep"), {
+			pattern: input.pattern,
+			...(input.path === undefined ? {} : { path: input.path }),
+			...(input.glob === undefined ? {} : { glob: input.glob }),
+			...(input.ignoreCase === undefined ? {} : { ignoreCase: input.ignoreCase }),
+			...(input.literal === undefined ? {} : { literal: input.literal }),
+			...(input.context === undefined ? {} : { context: input.context }),
+			...(input.limit === undefined ? {} : { limit: input.limit }),
+		});
+	}
+
+	private filesRoute(id: string, operation: string): string {
+		return `/v1/workspaces/${encodeURIComponent(id)}/files/${operation}`;
 	}
 
 	private async request(
@@ -293,20 +321,20 @@ export class ScrapdClient {
 	): Promise<{ exitCode: number | null }> {
 		const decoder = new TextDecoder();
 		let buffer = "";
-		let exit: { exitCode: number | null } | undefined;
+		let exit: ExitEvent | undefined;
 
 		const handleLine = (line: string) => {
 			if (line.length === 0) {
 				return;
 			}
 			const event = JSON.parse(line) as ExecEvent;
-			if (event.event === "data") {
+			if (event.type === "output") {
 				options.onData(
 					Buffer.from(event.data, "base64"),
 					event.stream === "stderr" ? "stderr" : "stdout",
 				);
-			} else if (event.event === "exit") {
-				exit = { exitCode: event.code };
+			} else if (event.type === "exit") {
+				exit = event;
 			}
 		};
 
@@ -325,7 +353,17 @@ export class ScrapdClient {
 		if (exit === undefined) {
 			throw new ScrapsConnectionError("scrapd exec stream ended without an exit event");
 		}
-		return exit;
+		if (exit.code === null && exit.reason !== undefined) {
+			// The daemon killed the process (server-side timeout or
+			// cancellation); surface it with the local tool's message shape.
+			if (exit.reason === "timeout") {
+				const seconds =
+					options.timeout ?? Math.round((exit.durationMs ?? 0) / 1000);
+				throw new Error(`timeout:${seconds}`);
+			}
+			throw new Error(`remote process exited: ${exit.reason}`);
+		}
+		return { exitCode: exit.code };
 	}
 }
 
@@ -337,3 +375,15 @@ export class ScrapsConnectionError extends Error {
 	}
 }
 
+function envRecord(env: NodeJS.ProcessEnv | undefined): { env?: Record<string, string> } {
+	if (env === undefined) {
+		return {};
+	}
+	const record: Record<string, string> = {};
+	for (const [key, value] of Object.entries(env)) {
+		if (value !== undefined) {
+			record[key] = value;
+		}
+	}
+	return Object.keys(record).length > 0 ? { env: record } : {};
+}

@@ -47,7 +47,7 @@ export function registerScrapCommands(
 					return;
 				}
 				const lines = workspaces.map(
-					(workspace) => `${workspace.id}  ${workspace.status}  ${workspace.project ?? ""}`,
+					(workspace) => `${workspace.id}  ${workspace.state}  ${workspace.project ?? ""}`,
 				);
 				ctx.ui.notify(lines.join("\n"), "info");
 			} catch (error) {
@@ -96,38 +96,6 @@ export function registerScrapCommands(
 		},
 	});
 
-	pi.registerCommand("scrap-start", {
-		description: "Start the attached Scraps workspace",
-		handler: async (_args, ctx) => {
-			if (!requireRemote(ctx.ui)) {
-				return;
-			}
-			try {
-				const workspace = await session.start();
-				refreshStatus(ctx.ui);
-				ctx.ui.notify(`Workspace ${workspace.id} is ${workspace.status}.`, "info");
-			} catch (error) {
-				ctx.ui.notify(`Cannot start workspace: ${describeError(error)}`, "error");
-			}
-		},
-	});
-
-	pi.registerCommand("scrap-stop", {
-		description: "Stop the attached Scraps workspace",
-		handler: async (_args, ctx) => {
-			if (!requireRemote(ctx.ui)) {
-				return;
-			}
-			try {
-				const workspace = await session.stop();
-				refreshStatus(ctx.ui);
-				ctx.ui.notify(`Workspace ${workspace.id} is ${workspace.status}.`, "info");
-			} catch (error) {
-				ctx.ui.notify(`Cannot stop workspace: ${describeError(error)}`, "error");
-			}
-		},
-	});
-
 	pi.registerCommand("scrap-rm", {
 		description: "Delete the attached Scraps workspace",
 		handler: async (_args, ctx) => {
@@ -156,30 +124,20 @@ export function registerScrapCommands(
 		},
 	});
 
+	// M1 has no start/stop lifecycle (directory provider workspaces are
+	// always running) and no preview registry yet; the commands exist so the
+	// interface is stable and clearly state what is coming.
+
 	pi.registerCommand("scrap-preview", {
 		description: "List service previews exposed by the workspace",
 		handler: async (_args, ctx) => {
 			if (!requireRemote(ctx.ui)) {
 				return;
 			}
-			const workspace = session.connectedWorkspace;
-			if (workspace === undefined) {
-				ctx.ui.notify("No workspace is attached. Use /scrap-select first.", "warning");
-				return;
-			}
-			try {
-				const previews = await session.requireClient().listPreviews(workspace.id);
-				if (previews.length === 0) {
-					ctx.ui.notify("The workspace exposes no service previews.", "info");
-					return;
-				}
-				ctx.ui.notify(
-					previews.map((preview) => `${preview.name}: ${preview.url}`).join("\n"),
-					"info",
-				);
-			} catch (error) {
-				ctx.ui.notify(`Cannot list previews: ${describeError(error)}`, "error");
-			}
+			ctx.ui.notify(
+				"Service previews are not implemented yet (arrive with M7 `scrap open`).",
+				"warning",
+			);
 		},
 	});
 

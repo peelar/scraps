@@ -13,8 +13,7 @@
   },
   "scripts": {
     "check": "tsc --noEmit",
-    "test": "node --test 'src/**/*.test.ts'",
-    "dev:scrapd": "node scripts/dev-scrapd.mjs"
+    "test": "node --test 'src/**/*.test.ts'"
   },
   "devDependencies": {
     "@earendil-works/pi-coding-agent": "0.84.2",

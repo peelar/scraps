@@ -124,13 +124,9 @@ function registerRemoteGrep(pi: ExtensionAPI, session: WorkspaceSession): void {
 				limit?: number;
 			};
 			const result = await runRemoteGrep(session, input);
-			const details: { matchLimitReached?: number } = {};
-			if (result.matchLimitReached !== undefined) {
-				details.matchLimitReached = result.matchLimitReached;
-			}
 			return {
 				content: [{ type: "text" as const, text: result.text }],
-				details,
+				details: result.details,
 			};
 		},
 	});
