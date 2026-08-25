@@ -69,15 +69,19 @@ CREATE TABLE IF NOT EXISTS workspaces (
 	return nil
 }
 
-// CreateWorkspace inserts a workspace row.
+// CreateWorkspace inserts a workspace row. Timestamps are set when zero.
 func (s *Store) CreateWorkspace(ctx context.Context, w Workspace) error {
 	now := time.Now().UTC()
-	w.CreatedAt = now
-	w.UpdatedAt = now
+	if w.CreatedAt.IsZero() {
+		w.CreatedAt = now
+	}
+	if w.UpdatedAt.IsZero() {
+		w.UpdatedAt = w.CreatedAt
+	}
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO workspaces (id, project, repo_url, state, created_at, updated_at)
 		 VALUES (?, ?, ?, ?, ?, ?);`,
-		w.ID, w.Project, w.RepoURL, w.State, now.Unix(), now.Unix())
+		w.ID, w.Project, w.RepoURL, w.State, w.CreatedAt.Unix(), w.UpdatedAt.Unix())
 	if err != nil {
 		return fmt.Errorf("insert workspace: %w", err)
 	}

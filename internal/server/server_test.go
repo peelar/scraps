@@ -366,8 +366,13 @@ func TestGlob(t *testing.T) {
 	if !strings.Contains(paths, "a.ts") || !strings.Contains(paths, "src/nested/a.ts") {
 		t.Fatalf("paths = %v", result.Paths)
 	}
-	if strings.Contains(paths, "node_modules") || strings.Contains(paths, "b.js") {
-		t.Fatalf("paths = %v", result.Paths)
+	for _, path := range result.Paths {
+		if path == filepath.Join(created.RootPath, "a.ts") {
+			continue // root-level match: ** must match zero segments
+		}
+		if strings.Contains(path, "node_modules") || strings.HasSuffix(path, "b.js") {
+			t.Fatalf("unexpected path %q", path)
+		}
 	}
 }
 

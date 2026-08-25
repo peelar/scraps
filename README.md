@@ -15,7 +15,7 @@ See [SPEC.md](./SPEC.md) for the product direction and
 cmd/scrap/                 local CLI
 cmd/scrapd/                Linux daemon
 internal/                  private Go packages
-packages/pi-extension/     extension loaded by Pi in every workspace
+packages/pi-extension/     Pi extension: local Pi, remote workspace tools (ADR 0001)
 ```
 
 ## Requirements
@@ -35,14 +35,29 @@ make build
 Built executables are written to `bin/`. Start the development daemon with
 `make dev-daemon`; it listens on `127.0.0.1:8484` by default.
 
-The Pi extension is TypeScript source because Pi loads TypeScript extensions
-directly. In a workspace it receives its identity through environment variables:
+## Pi integration
+
+Per [ADR 0001](./docs/adr/0001-local-pi-with-remote-workspace-tools.md), the
+canonical interactive integration runs Pi locally and executes the seven
+project-facing tools (`bash`, `read`, `write`, `edit`, `ls`, `find`, `grep`)
+in a remote Scraps workspace:
 
 ```bash
-SCRAP_WORKSPACE_ID=example \
-SCRAP_PROJECT=owner/repository \
-SCRAP_DAEMON_URL=http://scrapd.internal:8484 \
-pi --extension packages/pi-extension/src/index.ts
+pi --extension packages/pi-extension/src/index.ts --scrap [--workspace <id>]
+```
+
+`scrap pi [prompt]` will become the convenience launcher for this. While
+`--scrap` is active the tools fail closed — with no reachable workspace they
+error visibly and never fall back to the local machine.
+
+`packages/pi-extension/scripts/dev-scrapd.mjs` is a stand-in daemon for
+developing the extension until the Go daemon implements the workspace API
+(the endpoint contract lives in `packages/pi-extension/src/client.ts`):
+
+```bash
+pnpm --filter @scraps/pi-extension dev:scrapd
+SCRAP_DAEMON_URL=http://127.0.0.1:8484 SCRAP_WORKSPACE_ID=dev \
+  pi --extension packages/pi-extension/src/index.ts --scrap
 ```
 
 ## Configuration

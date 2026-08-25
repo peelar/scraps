@@ -81,11 +81,11 @@ async function startFakeDaemon(): Promise<FakeDaemon> {
 				response.writeHead(200, { "Content-Type": "application/x-ndjson" });
 				const line = (event: unknown) => response.write(`${JSON.stringify(event)}\n`);
 				line({ event: "start", pid: 4242 });
-				// Exercise multi-chunk streaming: split the base64 payload so
-				// chunks reassemble on the client side.
+				// Exercise multi-chunk streaming: split the base64 payload at a
+				// 4-character boundary so each chunk decodes independently.
 				const out = `ran: ${input.command}\n`;
 				const b64 = Buffer.from(out).toString("base64");
-				const mid = Math.floor(b64.length / 2);
+				const mid = Math.max(4, Math.floor(b64.length / 8) * 4);
 				line({ event: "data", stream: "stdout", data: b64.slice(0, mid) });
 				line({ event: "data", stream: "stdout", data: b64.slice(mid) });
 				line({ event: "data", stream: "stderr", data: Buffer.from("warn\n").toString("base64") });

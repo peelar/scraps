@@ -150,7 +150,12 @@ func (m *Manager) Create(ctx context.Context, options CreateOptions) (Workspace,
 			os.RemoveAll(root)
 			return Workspace{}, err
 		}
-		return fromStore(m.root, record), nil
+		// Re-read so timestamps assigned by the store are returned.
+		saved, err := m.store.GetWorkspace(ctx, id)
+		if err != nil {
+			return Workspace{}, err
+		}
+		return fromStore(m.root, saved), nil
 	}
 	return Workspace{}, errors.New("could not generate a unique workspace id")
 }

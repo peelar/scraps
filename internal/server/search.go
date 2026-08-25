@@ -92,9 +92,11 @@ func (s *Server) fileGlob(response http.ResponseWriter, request *http.Request) {
 }
 
 // compileGlob converts a glob with *, **, and ? into a matcher over
-// slash-separated relative paths.
+// slash-separated relative paths. `**/` matches zero or more path
+// segments, so `**/*.txt` also matches root-level files.
 func compileGlob(pattern string) func(string) bool {
 	expression := regexp.QuoteMeta(pattern)
+	expression = strings.ReplaceAll(expression, `\*\*/`, `(?:.*/)?`)
 	expression = strings.ReplaceAll(expression, `\*\*`, `.*`)
 	expression = strings.ReplaceAll(expression, `\*`, `[^/]*`)
 	expression = strings.ReplaceAll(expression, `\?`, `[^/]`)

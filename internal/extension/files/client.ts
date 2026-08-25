@@ -124,7 +124,9 @@ export class ScrapdClient {
 
 	/**
 	 * Execute a command in the workspace, streaming output through `onData`.
-	 * Resolves with the process exit status once the stream ends.
+	 * Resolves with the process exit status once the stream ends. The stream
+	 * is raced against explicit timeout/abort rejections because cancelling
+	 * the response body does not reliably interrupt a stalled stream.
 	 */
 	async exec(
 		id: string,
@@ -143,39 +145,46 @@ export class ScrapdClient {
 			},
 			options.signal,
 		);
-
 		if (response.body === null) {
 			throw new ScrapdApiError(response.status, "scrapd exec returned no body");
 		}
+		const body = response.body;
 
-		let timedOut = false;
+		let fail: ((error: Error) => void) | undefined;
+		const failure = new Promise<never>((_, reject) => {
+			fail = reject;
+		});
+
 		const timer =
 			options.timeout === undefined
 				? undefined
 				: setTimeout(() => {
-						timedOut = true;
-						response.body?.cancel().catch(() => {});
-					}, options.timeout * 1000);
+					fail?.(new Error(`timeout:${options.timeout}`));
+				}, options.timeout * 1000);
 
-		// Kept alive until the stream finishes so a late abort still surfaces.
-		const onAbort = () => response.body?.cancel().catch(() => {});
-		options.signal?.addEventListener("abort", onAbort, { once: true });
-
-		try {
-			const exit = await this.consumeExecStream(response.body, options);
-			if (options.signal?.aborted) {
+		const onAbort = () => {
+			fail?.(new Error("aborted"));
+		};
+		if (options.signal !== undefined) {
+			if (options.signal.aborted) {
 				throw new Error("aborted");
 			}
-			if (timedOut) {
-				throw new Error(`timeout:${options.timeout}`);
+			options.signal.addEventListener("abort", onAbort, { once: true });
+		}
+
+		const consuming = this.consumeExecStream(body, options);
+		// Keep a rejection from surfacing as unhandled if the race settles first.
+		consuming.catch(() => {});
+
+		try {
+			const exit = await Promise.race([consuming, failure]);
+			if (options.signal?.aborted) {
+				throw new Error("aborted");
 			}
 			return exit;
 		} catch (error) {
 			if (options.signal?.aborted) {
 				throw new Error("aborted");
-			}
-			if (timedOut) {
-				throw new Error(`timeout:${options.timeout}`);
 			}
 			throw error;
 		} finally {
@@ -183,6 +192,7 @@ export class ScrapdClient {
 				clearTimeout(timer);
 			}
 			options.signal?.removeEventListener("abort", onAbort);
+			body.cancel().catch(() => {});
 		}
 	}
 
