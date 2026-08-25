@@ -1,6 +1,9 @@
-.PHONY: build build-go check clean dev-daemon test
+.PHONY: build build-go check clean dev-daemon sync-extension test
 
-build: build-go
+build: sync-extension build-go
+
+sync-extension:
+	rsync -a --delete --exclude '*.test.ts' packages/pi-extension/src/ internal/extension/files/
 
 build-go:
 	mkdir -p bin

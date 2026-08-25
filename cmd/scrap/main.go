@@ -10,20 +10,24 @@ import (
 const usage = `scrap controls self-hosted agent workspaces.
 
 Usage:
-  scrap <command>
+  scrap <command> [arguments]
 
 Commands:
-  setup       Configure self-hosted infrastructure
-  auth        Configure credentials
-  pi          Start Pi in a fresh workspace
-  ls          List workspaces
-  attach      Attach to a workspace
-  ssh         Open a workspace shell
-  open        Open a project preview
-  diff        Show workspace changes
-  sync        Sync changes to the local checkout
-  rm          Remove a workspace
-  version     Print version information
+  pi [prompt]   Start Pi in a fresh workspace (see scrap pi --help)
+  ls            List workspaces
+  rm <id>...    Remove workspaces
+  setup         Configure self-hosted infrastructure (not implemented)
+  auth          Configure credentials (not implemented)
+  attach        Attach to a workspace (not implemented)
+  ssh           Open a workspace shell (not implemented)
+  open          Open a project preview (not implemented)
+  diff          Show workspace changes (not implemented)
+  sync          Sync changes to the local checkout (not implemented)
+  version       Print version information
+
+Environment:
+  SCRAP_DAEMON_URL   scrapd base URL (default http://127.0.0.1:8484)
+  SCRAP_TOKEN        scrapd bearer token when the daemon requires one
 `
 
 func main() {
@@ -36,11 +40,19 @@ func run(args []string) int {
 		return 0
 	}
 
-	if args[0] == "version" || args[0] == "--version" || args[0] == "-v" {
+	command, rest := args[0], args[1:]
+	switch command {
+	case "version", "--version", "-v":
 		fmt.Println(version.String("scrap"))
 		return 0
+	case "pi":
+		return runPi(rest)
+	case "ls":
+		return runList(rest)
+	case "rm":
+		return runRemove(rest)
+	default:
+		fmt.Fprintf(os.Stderr, "scrap: command %q is not implemented yet\n", command)
+		return 1
 	}
-
-	fmt.Fprintf(os.Stderr, "scrap: command %q is not implemented yet\n", args[0])
-	return 1
 }
