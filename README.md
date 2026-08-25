@@ -63,10 +63,10 @@ closed — with no reachable workspace they error visibly and never fall back
 to the local machine.
 
 An LLM-free integration harness for the full extension↔daemon surface lives
-at `packages/pi-extension/scripts/integration.mjs`:
+at `packages/pi-extension/scripts/integration.ts`:
 
 ```bash
-node packages/pi-extension/scripts/integration.mjs http://127.0.0.1:8484 <workspace-id>
+node packages/pi-extension/scripts/integration.ts http://127.0.0.1:8484 [workspace-id]
 ```
 
 ## Configuration
