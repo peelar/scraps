@@ -141,8 +141,9 @@ func runStatus(_ []string) int {
 func printStatus(manager *daemon.Manager, status daemon.Status) {
 	fmt.Printf("scrapd %s — %s (pid %d)\n", versionLabel(status), manager.URL(), status.PID)
 	if status.Info != nil {
-		fmt.Printf("  version %s (%s) · up %s · data %s\n",
-			status.Info.Version, status.Info.Commit, uptime(status.Info.StartedAt), status.Info.DataDir)
+		fmt.Printf("  version %s (%s) · up %s · provider %s (%s) · data %s\n",
+			status.Info.Version, status.Info.Commit, uptime(status.Info.StartedAt),
+			status.Info.Provider, status.Info.Isolation, status.Info.DataDir)
 	}
 	if status.StaleBinary {
 		fmt.Println("  ⚠ binary is newer than the running daemon — `scrap up` will restart it")

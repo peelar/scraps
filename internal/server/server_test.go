@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"io"
@@ -13,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/peelar/scraps/internal/provider"
 	"github.com/peelar/scraps/internal/workspace"
 )
 
@@ -69,6 +71,38 @@ func (ts *testServer) createWorkspace(t *testing.T, options workspace.CreateOpti
 	return created
 }
 
+type fakeProvider struct {
+	provider.Provider
+	workspaces []workspace.Workspace
+}
+
+func (f *fakeProvider) Info() provider.Info {
+	return provider.Info{Name: "fake", Isolation: provider.IsolationVM}
+}
+func (f *fakeProvider) List(context.Context) ([]workspace.Workspace, error) {
+	return f.workspaces, nil
+}
+
+func TestServerUsesInjectedProvider(t *testing.T) {
+	dataDir := t.TempDir()
+	fake := &fakeProvider{workspaces: []workspace.Workspace{{ID: "fake-one", State: "running", RootPath: "/workspace"}}}
+	server, err := New(Config{DataDir: dataDir, Provider: fake})
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+	defer server.Close()
+
+	request := httptest.NewRequest(http.MethodGet, "/v1/workspaces", nil)
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "fake-one") {
+		t.Fatalf("list through fake provider = %d %s", response.Code, response.Body.String())
+	}
+	if _, err := os.Stat(filepath.Join(dataDir, "workspaces")); !os.IsNotExist(err) {
+		t.Fatalf("server created host workspace directory with injected provider: %v", err)
+	}
+}
+
 func TestHealth(t *testing.T) {
 	ts := newTestServer(t)
 
@@ -91,6 +125,9 @@ func TestInfo(t *testing.T) {
 	}
 	if body.Name != "scrapd" {
 		t.Fatalf("name = %q, want scrapd", body.Name)
+	}
+	if body.Provider != "directory" || body.Isolation != "none" {
+		t.Fatalf("provider = %q isolation = %q, want directory/none", body.Provider, body.Isolation)
 	}
 }
 

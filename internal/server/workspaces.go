@@ -22,7 +22,7 @@ func (s *Server) createWorkspace(response http.ResponseWriter, request *http.Req
 		return
 	}
 
-	created, err := s.manager.Create(request.Context(), workspace.CreateOptions{
+	created, err := s.provider.Create(request.Context(), workspace.CreateOptions{
 		Project: body.Project,
 		RepoURL: body.RepoURL,
 	})
@@ -41,7 +41,7 @@ func workspaceCreationError(err error) error {
 }
 
 func (s *Server) listWorkspaces(response http.ResponseWriter, request *http.Request) {
-	workspaces, err := s.manager.List(request.Context())
+	workspaces, err := s.provider.List(request.Context())
 	if err != nil {
 		writeAPIError(response, err)
 		return
@@ -53,7 +53,7 @@ func (s *Server) listWorkspaces(response http.ResponseWriter, request *http.Requ
 }
 
 func (s *Server) getWorkspace(response http.ResponseWriter, request *http.Request) {
-	found, err := s.manager.Get(request.Context(), request.PathValue("id"))
+	found, err := s.provider.Get(request.Context(), request.PathValue("id"))
 	if err != nil {
 		writeAPIError(response, err)
 		return
@@ -62,7 +62,7 @@ func (s *Server) getWorkspace(response http.ResponseWriter, request *http.Reques
 }
 
 func (s *Server) deleteWorkspace(response http.ResponseWriter, request *http.Request) {
-	if err := s.manager.Delete(request.Context(), request.PathValue("id")); err != nil {
+	if err := s.provider.Delete(request.Context(), request.PathValue("id")); err != nil {
 		writeAPIError(response, err)
 		return
 	}
@@ -82,7 +82,7 @@ func decodeBody(request *http.Request, target any) error {
 // lookupWorkspace resolves the workspace from the request path or writes the
 // error response and returns false.
 func (s *Server) lookupWorkspace(response http.ResponseWriter, request *http.Request) (workspace.Workspace, bool) {
-	found, err := s.manager.Get(request.Context(), request.PathValue("id"))
+	found, err := s.provider.Get(request.Context(), request.PathValue("id"))
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			writeError(response, http.StatusNotFound, "not_found", "workspace not found")

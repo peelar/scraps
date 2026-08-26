@@ -107,6 +107,8 @@ type InfoResponse struct {
 	DataDir   string `json:"dataDir"`
 	StartedAt string `json:"startedAt"`
 	PID       int    `json:"pid"`
+	Provider  string `json:"provider"`
+	Isolation string `json:"isolation"`
 }
 
 // Info fetches daemon identity.

@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/peelar/scraps/internal/provider"
 	"github.com/peelar/scraps/internal/store"
 	"github.com/peelar/scraps/internal/version"
 	"github.com/peelar/scraps/internal/workspace"
@@ -23,12 +24,14 @@ type Config struct {
 	DataDir string
 	// Token, when set, requires `Authorization: Bearer <token>` on /v1.
 	Token string
+	// Provider overrides the default directory provider, primarily for tests
+	// and alternate workspace runtimes.
+	Provider provider.Provider
 }
 
-// Server wires the store, workspace manager, and HTTP routes.
+// Server wires a workspace provider and HTTP routes.
 type Server struct {
-	store    *store.Store
-	manager  *workspace.Manager
+	provider provider.Provider
 	token    string
 	handler  http.Handler
 	dataDir  string
@@ -45,23 +48,28 @@ func New(config Config) (*Server, error) {
 		return nil, errors.New("server: create data dir")
 	}
 
-	st, err := store.Open(filepath.Join(config.DataDir, "scrapd.db"))
-	if err != nil {
-		return nil, err
-	}
-	manager, err := workspace.NewManager(st, config.DataDir)
-	if err != nil {
-		st.Close()
-		return nil, err
+	runtime := config.Provider
+	shutdown := func() {}
+	if runtime == nil {
+		st, err := store.Open(filepath.Join(config.DataDir, "scrapd.db"))
+		if err != nil {
+			return nil, err
+		}
+		directory, err := provider.NewDirectory(st, config.DataDir)
+		if err != nil {
+			st.Close()
+			return nil, err
+		}
+		runtime = directory
+		shutdown = func() { st.Close() }
 	}
 
 	server := &Server{
-		store:    st,
-		manager:  manager,
+		provider: runtime,
 		token:    config.Token,
 		dataDir:  config.DataDir,
 		started:  time.Now(),
-		shutdown: func() { st.Close() },
+		shutdown: shutdown,
 	}
 	server.handler = server.routes()
 	return server, nil
@@ -105,6 +113,7 @@ func health(response http.ResponseWriter, _ *http.Request) {
 
 func info(server *Server) http.HandlerFunc {
 	return func(response http.ResponseWriter, _ *http.Request) {
+		providerInfo := server.provider.Info()
 		writeJSON(response, http.StatusOK, infoResponse{
 			Name:      "scrapd",
 			Version:   version.Version,
@@ -112,6 +121,8 @@ func info(server *Server) http.HandlerFunc {
 			DataDir:   server.dataDir,
 			StartedAt: server.started.UTC().Format(time.RFC3339),
 			PID:       os.Getpid(),
+			Provider:  providerInfo.Name,
+			Isolation: string(providerInfo.Isolation),
 		})
 	}
 }
@@ -123,6 +134,8 @@ type infoResponse struct {
 	DataDir   string `json:"dataDir"`
 	StartedAt string `json:"startedAt"`
 	PID       int    `json:"pid"`
+	Provider  string `json:"provider"`
+	Isolation string `json:"isolation"`
 }
 
 // requireAuth enforces the bearer token when one is configured.
