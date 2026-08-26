@@ -49,19 +49,25 @@ func (d *Directory) Get(c context.Context, id string) (workspace.Workspace, erro
 	return d.manager.Get(c, id)
 }
 func (d *Directory) List(c context.Context) ([]workspace.Workspace, error) { return d.manager.List(c) }
+func (d *Directory) Start(c context.Context, id string) error              { return d.manager.Start(c, id) }
+func (d *Directory) Stop(c context.Context, id string) error               { return d.manager.Stop(c, id) }
 func (d *Directory) Delete(c context.Context, id string) error             { return d.manager.Delete(c, id) }
 
 func (d *Directory) path(id, path string) (string, error) { return d.manager.ResolvePath(id, path) }
 
 func (d *Directory) Exec(ctx context.Context, id string, r ExecRequest, emit func(ExecEvent)) error {
-	if _, err := d.Get(ctx, id); err != nil {
+	w, err := d.Get(ctx, id)
+	if err != nil {
 		return err
+	}
+	if w.State != "running" {
+		return &InvalidRequestError{Message: "workspace is stopped: " + id}
 	}
 	cwd := r.CWD
 	if cwd == "" {
 		cwd = "."
 	}
-	cwd, err := d.path(id, cwd)
+	cwd, err = d.path(id, cwd)
 	if err != nil {
 		return err
 	}

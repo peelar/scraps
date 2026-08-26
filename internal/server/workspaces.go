@@ -61,6 +61,32 @@ func (s *Server) getWorkspace(response http.ResponseWriter, request *http.Reques
 	writeJSON(response, http.StatusOK, found)
 }
 
+func (s *Server) startWorkspace(response http.ResponseWriter, request *http.Request) {
+	if err := s.provider.Start(request.Context(), request.PathValue("id")); err != nil {
+		writeAPIError(response, err)
+		return
+	}
+	found, err := s.provider.Get(request.Context(), request.PathValue("id"))
+	if err != nil {
+		writeAPIError(response, err)
+		return
+	}
+	writeJSON(response, http.StatusOK, found)
+}
+
+func (s *Server) stopWorkspace(response http.ResponseWriter, request *http.Request) {
+	if err := s.provider.Stop(request.Context(), request.PathValue("id")); err != nil {
+		writeAPIError(response, err)
+		return
+	}
+	found, err := s.provider.Get(request.Context(), request.PathValue("id"))
+	if err != nil {
+		writeAPIError(response, err)
+		return
+	}
+	writeJSON(response, http.StatusOK, found)
+}
+
 func (s *Server) deleteWorkspace(response http.ResponseWriter, request *http.Request) {
 	if err := s.provider.Delete(request.Context(), request.PathValue("id")); err != nil {
 		writeAPIError(response, err)

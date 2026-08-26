@@ -15,6 +15,8 @@ Usage:
 Commands:
   pi [prompt]   Start Pi in a fresh workspace (see scrap pi --help)
   ls            List workspaces
+  start <id>    Start a stopped workspace
+  stop <id>     Stop a running workspace
   rm <id>...    Remove workspaces
   up            Ensure the local scrapd daemon is running
   down          Stop the local scrapd daemon
@@ -52,6 +54,8 @@ func run(args []string) int {
 		return runPi(rest)
 	case "ls":
 		return runList(rest)
+	case "start", "stop":
+		return runWorkspaceState(command, rest)
 	case "rm":
 		return runRemove(rest)
 	case "up":

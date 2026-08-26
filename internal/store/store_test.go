@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"path/filepath"
 	"testing"
@@ -36,6 +37,28 @@ func TestWorkspaceRoundTrip(t *testing.T) {
 	}
 	if time.Since(got.CreatedAt) > time.Minute {
 		t.Fatalf("created at = %v, want recent", got.CreatedAt)
+	}
+}
+
+func TestMigratesPreProviderWorkspacesToDirectory(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "old.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`CREATE TABLE workspaces (id TEXT PRIMARY KEY, project TEXT NOT NULL DEFAULT '', repo_url TEXT NOT NULL DEFAULT '', state TEXT NOT NULL DEFAULT 'running', created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL); INSERT INTO workspaces VALUES ('old', '', '', 'running', 1, 1)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	st, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	got, err := st.GetWorkspace(context.Background(), "old")
+	if err != nil || got.Provider != "directory" {
+		t.Fatalf("migrated = %+v, %v", got, err)
 	}
 }
 

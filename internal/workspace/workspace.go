@@ -153,7 +153,7 @@ func (m *Manager) Create(ctx context.Context, options CreateOptions) (Workspace,
 			}
 		}
 
-		record := store.Workspace{ID: id, Project: options.Project, RepoURL: repoURL, State: "running"}
+		record := store.Workspace{ID: id, Project: options.Project, RepoURL: repoURL, Provider: "directory", State: "running"}
 		if err := m.store.CreateWorkspace(ctx, record); err != nil {
 			os.RemoveAll(root)
 			return Workspace{}, err
@@ -202,6 +202,9 @@ func (m *Manager) Get(ctx context.Context, id string) (Workspace, error) {
 	if err != nil {
 		return Workspace{}, err
 	}
+	if record.Provider != "directory" {
+		return Workspace{}, store.ErrNotFound
+	}
 	return fromStore(record), nil
 }
 
@@ -211,11 +214,29 @@ func (m *Manager) List(ctx context.Context) ([]Workspace, error) {
 	if err != nil {
 		return nil, err
 	}
-	workspaces := make([]Workspace, len(records))
-	for i, record := range records {
-		workspaces[i] = fromStore(record)
+	workspaces := make([]Workspace, 0, len(records))
+	for _, record := range records {
+		if record.Provider == "directory" {
+			workspaces = append(workspaces, fromStore(record))
+		}
 	}
 	return workspaces, nil
+}
+
+// Start marks a directory workspace available. It does not add isolation.
+func (m *Manager) Start(ctx context.Context, id string) error {
+	if _, err := m.Get(ctx, id); err != nil {
+		return err
+	}
+	return m.store.UpdateWorkspaceState(ctx, id, "running")
+}
+
+// Stop marks a directory workspace unavailable.
+func (m *Manager) Stop(ctx context.Context, id string) error {
+	if _, err := m.Get(ctx, id); err != nil {
+		return err
+	}
+	return m.store.UpdateWorkspaceState(ctx, id, "stopped")
 }
 
 // Delete removes the workspace directory and record.

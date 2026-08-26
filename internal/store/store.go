@@ -19,6 +19,7 @@ type Workspace struct {
 	ID        string
 	Project   string
 	RepoURL   string
+	Provider  string
 	State     string
 	CreatedAt time.Time
 	UpdatedAt time.Time
@@ -60,11 +61,37 @@ CREATE TABLE IF NOT EXISTS workspaces (
 	project    TEXT NOT NULL DEFAULT '',
 	repo_url   TEXT NOT NULL DEFAULT '',
 	state      TEXT NOT NULL DEFAULT 'running',
+	provider   TEXT NOT NULL DEFAULT 'directory',
 	created_at INTEGER NOT NULL,
 	updated_at INTEGER NOT NULL
 );`)
 	if err != nil {
 		return fmt.Errorf("migrate database: %w", err)
+	}
+	// Databases created before providers were selectable contain directory
+	// workspaces. SQLite has no ADD COLUMN IF NOT EXISTS, so inspect first.
+	rows, err := s.db.Query(`PRAGMA table_info(workspaces)`)
+	if err != nil {
+		return fmt.Errorf("inspect workspace schema: %w", err)
+	}
+	hasProvider := false
+	for rows.Next() {
+		var cid, notnull, pk int
+		var name, typ string
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &typ, &notnull, &defaultValue, &pk); err != nil {
+			rows.Close()
+			return err
+		}
+		if name == "provider" {
+			hasProvider = true
+		}
+	}
+	rows.Close()
+	if !hasProvider {
+		if _, err := s.db.Exec(`ALTER TABLE workspaces ADD COLUMN provider TEXT NOT NULL DEFAULT 'directory'`); err != nil {
+			return fmt.Errorf("add workspace provider: %w", err)
+		}
 	}
 	return nil
 }
@@ -78,10 +105,13 @@ func (s *Store) CreateWorkspace(ctx context.Context, w Workspace) error {
 	if w.UpdatedAt.IsZero() {
 		w.UpdatedAt = w.CreatedAt
 	}
+	if w.Provider == "" {
+		w.Provider = "directory"
+	}
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO workspaces (id, project, repo_url, state, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?);`,
-		w.ID, w.Project, w.RepoURL, w.State, w.CreatedAt.Unix(), w.UpdatedAt.Unix())
+		`INSERT INTO workspaces (id, project, repo_url, state, provider, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?);`,
+		w.ID, w.Project, w.RepoURL, w.State, w.Provider, w.CreatedAt.Unix(), w.UpdatedAt.Unix())
 	if err != nil {
 		return fmt.Errorf("insert workspace: %w", err)
 	}
@@ -91,7 +121,7 @@ func (s *Store) CreateWorkspace(ctx context.Context, w Workspace) error {
 // GetWorkspace loads a workspace by ID.
 func (s *Store) GetWorkspace(ctx context.Context, id string) (Workspace, error) {
 	row := s.db.QueryRowContext(ctx,
-		`SELECT id, project, repo_url, state, created_at, updated_at
+		`SELECT id, project, repo_url, state, provider, created_at, updated_at
 		 FROM workspaces WHERE id = ?;`, id)
 	return scanWorkspace(row)
 }
@@ -99,7 +129,7 @@ func (s *Store) GetWorkspace(ctx context.Context, id string) (Workspace, error) 
 // ListWorkspaces returns all workspaces ordered by creation time.
 func (s *Store) ListWorkspaces(ctx context.Context) ([]Workspace, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, project, repo_url, state, created_at, updated_at
+		`SELECT id, project, repo_url, state, provider, created_at, updated_at
 		 FROM workspaces ORDER BY created_at, id;`)
 	if err != nil {
 		return nil, fmt.Errorf("query workspaces: %w", err)
@@ -115,6 +145,22 @@ func (s *Store) ListWorkspaces(ctx context.Context) ([]Workspace, error) {
 		workspaces = append(workspaces, w)
 	}
 	return workspaces, rows.Err()
+}
+
+// UpdateWorkspaceState changes the persisted lifecycle state.
+func (s *Store) UpdateWorkspaceState(ctx context.Context, id, state string) error {
+	result, err := s.db.ExecContext(ctx, `UPDATE workspaces SET state = ?, updated_at = ? WHERE id = ?`, state, time.Now().UTC().Unix(), id)
+	if err != nil {
+		return fmt.Errorf("update workspace state: %w", err)
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if changed == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 // DeleteWorkspace removes a workspace row.
@@ -151,7 +197,7 @@ type rowScanner interface{ Scan(dest ...any) error }
 func scanWorkspace(row rowScanner) (Workspace, error) {
 	var w Workspace
 	var created, updated int64
-	if err := row.Scan(&w.ID, &w.Project, &w.RepoURL, &w.State, &created, &updated); err != nil {
+	if err := row.Scan(&w.ID, &w.Project, &w.RepoURL, &w.State, &w.Provider, &created, &updated); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return Workspace{}, ErrNotFound
 		}

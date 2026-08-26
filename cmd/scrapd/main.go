@@ -42,8 +42,10 @@ func run() error {
 	}
 
 	apiServer, err := server.New(server.Config{
-		DataDir: dataDir,
-		Token:   os.Getenv("SCRAPD_TOKEN"),
+		DataDir:      dataDir,
+		Token:        os.Getenv("SCRAPD_TOKEN"),
+		ProviderName: os.Getenv("SCRAPD_PROVIDER"),
+		DockerImage:  os.Getenv("SCRAPD_DOCKER_IMAGE"),
 	})
 	if err != nil {
 		return err

@@ -31,16 +31,34 @@ Useful commands:
 ```bash
 scrap ls                 # workspaces waiting for you
 scrap pi --workspace ID  # jump back in
+scrap stop ID / start ID # pause and resume
 scrap rm ID              # sweep up
 scrap status             # check the daemon
 scrap down               # lights out
 ```
 
+## Docker workspaces
+
+Directory workspaces remain the trusted-development default. For an isolated
+Linux workspace, build the pinned image and select Docker before starting the
+daemon:
+
+```bash
+make down
+make docker-image
+SCRAPD_PROVIDER=docker make up
+```
+
+Override the image with `SCRAPD_DOCKER_IMAGE`. Docker Engine, Docker Desktop,
+and OrbStack are supported through the Docker CLI.
+
 ## Where it is today
 
-Scraps is an early prototype. The current provider uses **literal directories
-and host processes—it is not a security sandbox yet**. Docker is the next
-provider; Proxmox VMs are the production destination.
+Scraps is an early prototype. Directory mode uses **literal directories and
+host processes—it is not a security sandbox**. Docker mode adds an unprivileged
+container and private volume with CPU, memory, and PID limits, but is not the
+final hostile multi-tenant boundary. Proxmox VMs are the production
+destination.
 
 Pi already runs locally with seven fail-closed, workspace-backed tools:
 `bash`, `read`, `write`, `edit`, `ls`, `find`, and `grep`.

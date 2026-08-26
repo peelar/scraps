@@ -33,8 +33,8 @@ Scraps will implement three providers in this order:
 
 1. **Directory provider** — retained for API tests and trusted local
    development only. It must be labeled explicitly as having no isolation.
-2. **Docker provider** — the next implementation milestone and local Linux
-   sandbox. It validates provider boundaries, images, persistent workspace
+2. **Docker provider** — implemented as the local Linux sandbox and provider
+   contract test. It validates provider boundaries, images, persistent workspace
    storage, lifecycle, resource limits, and exec semantics with short feedback
    loops. Docker Desktop, OrbStack, and a native Linux Docker Engine are
    acceptable runtimes behind the same provider.
@@ -72,7 +72,7 @@ directory or invoke host processes directly.
 
 ### Docker provider baseline
 
-Each Docker workspace will have:
+Each Docker workspace has:
 
 - one container created from a pinned Scraps development image;
 - a persistent named volume mounted at `/workspace`;
@@ -188,8 +188,8 @@ sync flows.
    M1 externally observable behavior.
 2. Version the API path contract and migrate the Pi extension to relative paths
    with `/workspace` as its stable visible root.
-3. Implement the Docker provider, pinned development image, volume lifecycle,
-   resource limits, cancellation, and provider conformance tests.
+3. Maintain the implemented Docker provider, pinned development image, volume
+   lifecycle, resource limits, cancellation, and provider conformance tests.
 4. Define sandbox environment, network, secret-brokering, and threat-model
    policies.
 5. Define the Pi resource policy that preserves skills/prompts while governing

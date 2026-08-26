@@ -44,6 +44,31 @@ func runList(_ []string) int {
 	return 0
 }
 
+func runWorkspaceState(command string, args []string) int {
+	if len(args) != 1 {
+		fmt.Fprintf(os.Stderr, "usage: scrap %s <workspace-id>\n", command)
+		return 2
+	}
+	ensureDaemonAuto()
+	api := newClientFromEnv()
+	var err error
+	if command == "start" {
+		_, err = api.StartWorkspace(context.Background(), args[0])
+	} else {
+		_, err = api.StopWorkspace(context.Background(), args[0])
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "scrap: %s %s: %v\n", command, args[0], err)
+		return 1
+	}
+	verb := "stopped"
+	if command == "start" {
+		verb = "started"
+	}
+	fmt.Printf("%s %s\n", verb, args[0])
+	return 0
+}
+
 func runRemove(args []string) int {
 	if len(args) == 0 {
 		fmt.Fprintln(os.Stderr, "usage: scrap rm <workspace-id>...")

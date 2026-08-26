@@ -123,6 +123,13 @@ func TestHealth(t *testing.T) {
 	}
 }
 
+func TestRejectsUnknownProvider(t *testing.T) {
+	_, err := New(Config{DataDir: t.TempDir(), ProviderName: "mystery"})
+	if err == nil || !strings.Contains(err.Error(), `unknown provider "mystery"`) {
+		t.Fatalf("error = %v", err)
+	}
+}
+
 func TestInfo(t *testing.T) {
 	ts := newTestServer(t)
 
@@ -264,6 +271,19 @@ func TestExecStreamsOutputAndExitCode(t *testing.T) {
 	output := execOutput(events)
 	if !strings.Contains(output, "hello") || !strings.Contains(output, "err") {
 		t.Fatalf("output = %q", output)
+	}
+}
+
+func TestWorkspaceStartStop(t *testing.T) {
+	ts := newTestServer(t)
+	created := ts.createWorkspace(t, workspace.CreateOptions{})
+	response := ts.do(t, http.MethodPost, "/v1/workspaces/"+created.ID+"/stop", nil, "")
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"state":"stopped"`) {
+		t.Fatalf("stop = %d %s", response.Code, response.Body.String())
+	}
+	response = ts.do(t, http.MethodPost, "/v1/workspaces/"+created.ID+"/start", nil, "")
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"state":"running"`) {
+		t.Fatalf("start = %d %s", response.Code, response.Body.String())
 	}
 }
 

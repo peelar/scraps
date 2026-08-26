@@ -2,9 +2,11 @@
 package server
 
 import (
+	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -24,9 +26,12 @@ type Config struct {
 	DataDir string
 	// Token, when set, requires `Authorization: Bearer <token>` on /v1.
 	Token string
-	// Provider overrides the default directory provider, primarily for tests
-	// and alternate workspace runtimes.
+	// Provider overrides provider construction, primarily for tests.
 	Provider provider.Provider
+	// ProviderName selects "directory" (default) or "docker".
+	ProviderName string
+	// DockerImage overrides the Docker provider image.
+	DockerImage string
 }
 
 // Server wires a workspace provider and HTTP routes.
@@ -55,12 +60,18 @@ func New(config Config) (*Server, error) {
 		if err != nil {
 			return nil, err
 		}
-		directory, err := provider.NewDirectory(st, config.DataDir)
+		switch config.ProviderName {
+		case "", "directory":
+			runtime, err = provider.NewDirectory(st, config.DataDir)
+		case "docker":
+			runtime, err = provider.NewDocker(context.Background(), st, config.DockerImage)
+		default:
+			err = fmt.Errorf("server: unknown provider %q", config.ProviderName)
+		}
 		if err != nil {
 			st.Close()
 			return nil, err
 		}
-		runtime = directory
 		shutdown = func() { st.Close() }
 	}
 
@@ -89,6 +100,8 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /v1/workspaces", s.requireAuth(s.createWorkspace))
 	mux.HandleFunc("GET /v1/workspaces", s.requireAuth(s.listWorkspaces))
 	mux.HandleFunc("GET /v1/workspaces/{id}", s.requireAuth(s.getWorkspace))
+	mux.HandleFunc("POST /v1/workspaces/{id}/start", s.requireAuth(s.startWorkspace))
+	mux.HandleFunc("POST /v1/workspaces/{id}/stop", s.requireAuth(s.stopWorkspace))
 	mux.HandleFunc("DELETE /v1/workspaces/{id}", s.requireAuth(s.deleteWorkspace))
 
 	mux.HandleFunc("POST /v1/workspaces/{id}/exec", s.requireAuth(s.execCommand))
@@ -123,6 +136,7 @@ func info(server *Server) http.HandlerFunc {
 			PID:       os.Getpid(),
 			Provider:  providerInfo.Name,
 			Isolation: string(providerInfo.Isolation),
+			Image:     providerInfo.Image,
 			Policy:    providerInfo.Policy,
 		})
 	}
@@ -137,6 +151,7 @@ type infoResponse struct {
 	PID       int             `json:"pid"`
 	Provider  string          `json:"provider"`
 	Isolation string          `json:"isolation"`
+	Image     string          `json:"image,omitempty"`
 	Policy    provider.Policy `json:"policy"`
 }
 

@@ -63,10 +63,13 @@ directory. This provider has no isolation; VM isolation arrives in M4.
   are out of scope until M3 identity work.
 - `GET /v1/workspaces` → `{workspaces: [...]}`
 - `GET /v1/workspaces/{id}` → workspace
-- `DELETE /v1/workspaces/{id}` → 204, removes the directory and the row.
+- `POST /v1/workspaces/{id}/start` → 200 with the running workspace.
+- `POST /v1/workspaces/{id}/stop` → 200 with the stopped workspace.
+- `DELETE /v1/workspaces/{id}` → 204, removes provider runtime/storage and the row.
 
-State is `running` for the directory provider. `stopped`/`sleeping` states and
-start/stop endpoints arrive with M4/M6.
+State is `running` or `stopped`. Docker start/stop maps to container lifecycle
+and preserves its private volume. Directory mode records the state but cannot
+provide process isolation.
 
 ### Streaming execution
 
@@ -186,6 +189,6 @@ explicit client support.
 
 1. `.gitignore`-aware search (M2, likely via ripgrep on the host).
 2. exec environment policy and credential brokering (M2/M3).
-3. Workspace stop/start/sleep lifecycle states (M4/M6).
+3. Sleeping/automatic-idle lifecycle policy (M4/M6); explicit start/stop is implemented.
 4. Add provider-specific enforcement that `/workspace` is the real mounted
    root rather than directory-provider emulation.

@@ -110,6 +110,7 @@ type InfoResponse struct {
 	PID       int             `json:"pid"`
 	Provider  string          `json:"provider"`
 	Isolation string          `json:"isolation"`
+	Image     string          `json:"image,omitempty"`
 	Policy    provider.Policy `json:"policy"`
 }
 
@@ -144,6 +145,20 @@ func (c *Client) ListWorkspaces(ctx context.Context) ([]workspace.Workspace, err
 	}
 	err := c.do(ctx, http.MethodGet, "/v1/workspaces", nil, &listed)
 	return listed.Workspaces, err
+}
+
+// StartWorkspace starts a stopped workspace.
+func (c *Client) StartWorkspace(ctx context.Context, id string) (workspace.Workspace, error) {
+	var found workspace.Workspace
+	err := c.do(ctx, http.MethodPost, "/v1/workspaces/"+id+"/start", nil, &found)
+	return found, err
+}
+
+// StopWorkspace stops a running workspace.
+func (c *Client) StopWorkspace(ctx context.Context, id string) (workspace.Workspace, error) {
+	var found workspace.Workspace
+	err := c.do(ctx, http.MethodPost, "/v1/workspaces/"+id+"/stop", nil, &found)
+	return found, err
 }
 
 // DeleteWorkspace removes a workspace.

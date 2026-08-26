@@ -30,7 +30,9 @@ type Policy struct {
 type Info struct {
 	Name      string
 	Isolation Isolation
-	Policy    Policy
+	// Image is the immutable runtime image identity when applicable.
+	Image  string
+	Policy Policy
 }
 
 // Provider owns workspace lifecycle, execution, and filesystem operations.
@@ -40,6 +42,8 @@ type Provider interface {
 	Create(context.Context, workspace.CreateOptions) (workspace.Workspace, error)
 	Get(context.Context, string) (workspace.Workspace, error)
 	List(context.Context) ([]workspace.Workspace, error)
+	Start(context.Context, string) error
+	Stop(context.Context, string) error
 	Delete(context.Context, string) error
 
 	Exec(context.Context, string, ExecRequest, func(ExecEvent)) error
