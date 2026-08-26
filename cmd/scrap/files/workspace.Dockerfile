@@ -1,6 +1,5 @@
-# OpenShell's maintained agent image supplies the users, supervisor-compatible
-# layout, network tooling, common development tools, and supported agent CLIs.
-# Pin by digest so `make up` is reproducible even when the community tag moves.
+# OpenShell's maintained agent image supplies its supervisor-compatible users,
+# network tooling, common development tools, and supported agent CLIs.
 FROM ghcr.io/nvidia/openshell-community/sandboxes/base@sha256:aeef1c63f00e2913ea002ccb3aaf925f338b5c5d70e63576f0d95c16a138044e
 
 USER root

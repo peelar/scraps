@@ -21,7 +21,7 @@ Commands:
   up            Ensure the local scrapd daemon is running
   down          Stop the local scrapd daemon
   status        Show daemon and workspace status
-  setup         Configure self-hosted infrastructure (not implemented)
+  setup         Install/check OpenShell and build the workspace image
   auth          Configure credentials (not implemented)
   attach        Attach to a workspace (not implemented)
   ssh           Open a workspace shell (not implemented)
@@ -58,6 +58,8 @@ func run(args []string) int {
 		return runWorkspaceState(command, rest)
 	case "rm":
 		return runRemove(rest)
+	case "setup":
+		return runSetup(rest)
 	case "up":
 		return runUp(rest)
 	case "down":

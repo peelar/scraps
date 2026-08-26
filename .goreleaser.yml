@@ -1,0 +1,50 @@
+version: 2
+
+project_name: scraps
+
+before:
+  hooks:
+    - go test ./...
+    - go vet ./...
+
+builds:
+  - id: scrap
+    main: ./cmd/scrap
+    binary: scrap
+    env: [CGO_ENABLED=0]
+    goos: [darwin, linux]
+    goarch: [amd64, arm64]
+    flags: [-trimpath]
+    ldflags:
+      - -s -w
+      - -X github.com/peelar/scraps/internal/version.Version={{.Version}}
+      - -X github.com/peelar/scraps/internal/version.Commit={{.Commit}}
+  - id: scrapd
+    main: ./cmd/scrapd
+    binary: scrapd
+    env: [CGO_ENABLED=0]
+    goos: [darwin, linux]
+    goarch: [amd64, arm64]
+    flags: [-trimpath]
+    ldflags:
+      - -s -w
+      - -X github.com/peelar/scraps/internal/version.Version={{.Version}}
+      - -X github.com/peelar/scraps/internal/version.Commit={{.Commit}}
+
+archives:
+  - ids: [scrap, scrapd]
+    formats: [tar.gz]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+
+release:
+  draft: true

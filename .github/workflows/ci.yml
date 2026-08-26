@@ -22,6 +22,12 @@ jobs:
       - run: go vet ./...
       - run: test -z "$(gofmt -l cmd internal)"
       - run: make build-go
+      - name: Validate release packaging
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: '~> v2'
+          args: check
 
   typescript:
     name: TypeScript

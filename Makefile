@@ -1,30 +1,11 @@
 INSTALL_DIR ?= $(HOME)/.local/bin
-OPENSHELL_VERSION ?= v0.0.113
+.PHONY: build build-go check clean dev-daemon docker-image down install sync-extension test uninstall up
 
-.PHONY: build build-go check clean dev-daemon docker-image down install openshell-ready sync-extension test uninstall up
-
-# One-command local setup: install/start OpenShell, build the workspace image,
-# install stable PATH entries, and ensure scrapd.
-up: openshell-ready docker-image install
+# Contributor bootstrap. The installed CLI owns infrastructure setup so this
+# follows the same path as a future package-manager installation.
+up: install
+	$(INSTALL_DIR)/scrap setup
 	$(INSTALL_DIR)/scrap up
-
-openshell-ready:
-	@if [ -n "$(SCRAPD_PROVIDER)" ] && [ "$(SCRAPD_PROVIDER)" != "openshell" ]; then \
-		echo "OpenShell bootstrap skipped for $(SCRAPD_PROVIDER) provider"; \
-		exit 0; \
-	fi; \
-	expected="$(OPENSHELL_VERSION)"; expected="$${expected#v}"; \
-	installed="$$(openshell --version 2>/dev/null | awk 'NR == 1 { print $$2 }')"; \
-	if [ "$$installed" != "$$expected" ]; then \
-		echo "installing OpenShell $(OPENSHELL_VERSION) (found $${installed:-none})..."; \
-		curl -LsSf "https://raw.githubusercontent.com/NVIDIA/OpenShell/$(OPENSHELL_VERSION)/install.sh" | \
-			OPENSHELL_VERSION="$(OPENSHELL_VERSION)" sh; \
-	fi; \
-	openshell status >/dev/null || { \
-		echo "OpenShell is installed but its gateway is not ready; inspect its service logs" >&2; \
-		exit 1; \
-	}; \
-	echo "OpenShell gateway ready → $$(openshell --version | head -1)"
 
 install: build
 	mkdir -p $(INSTALL_DIR)
@@ -60,8 +41,8 @@ clean:
 dev-daemon:
 	go run ./cmd/scrapd
 
-docker-image:
-	docker build --pull -t scraps-dev:bookworm docker
+docker-image: build-go
+	./bin/scrap setup
 
 test:
 	go test ./...
