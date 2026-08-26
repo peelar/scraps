@@ -1,4 +1,10 @@
-.PHONY: build build-go check clean dev-daemon sync-extension test
+.PHONY: build build-go check clean dev-daemon down sync-extension test up
+
+up: build
+	./bin/scrap up
+
+down:
+	./bin/scrap down
 
 build: sync-extension build-go
 

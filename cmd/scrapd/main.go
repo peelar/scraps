@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -12,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/peelar/scraps/internal/daemon"
 	"github.com/peelar/scraps/internal/server"
 )
 
@@ -49,9 +51,30 @@ func run() error {
 	defer apiServer.Close()
 
 	httpServer := &http.Server{
-		Addr:              address,
 		Handler:           apiServer.Handler(),
 		ReadHeaderTimeout: 5 * time.Second,
+	}
+
+	// Bind explicitly so port conflicts fail before the pid file exists.
+	listener, err := net.Listen("tcp", address)
+	if err != nil {
+		return fmt.Errorf("listen %s: %w", address, err)
+	}
+
+	pidFile := os.Getenv("SCRAPD_PID_FILE")
+	if pidFile == "" {
+		_, port, _ := net.SplitHostPort(address)
+		userHome, err := os.UserHomeDir()
+		if err == nil {
+			pidFile = filepath.Join(userHome, ".scrap", fmt.Sprintf("scrapd-%s.pid", port))
+		}
+	}
+	if pidFile != "" {
+		if err := daemon.WritePIDFile(pidFile); err != nil {
+			slog.Warn("write pid file", "path", pidFile, "error", err)
+		} else {
+			defer daemon.RemovePIDFile(pidFile)
+		}
 	}
 
 	stop := make(chan os.Signal, 1)
@@ -61,7 +84,7 @@ func run() error {
 	serveError := make(chan error, 1)
 	go func() {
 		slog.Info("scrapd listening", "address", address)
-		serveError <- httpServer.ListenAndServe()
+		serveError <- httpServer.Serve(listener)
 	}()
 
 	select {

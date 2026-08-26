@@ -55,6 +55,8 @@ func runPi(args []string) int {
 	}
 	api := client.New(url, os.Getenv("SCRAP_TOKEN"))
 
+	ensureDaemonAuto()
+
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	defer cancel()
 
@@ -188,4 +190,13 @@ func extensionPath() (string, error) {
 		return "", fmt.Errorf("install extension: %w", err)
 	}
 	return entry, nil
+}
+
+// daemonURLFromEnv resolves the daemon base URL.
+func daemonURLFromEnv() string {
+	url := os.Getenv("SCRAP_DAEMON_URL")
+	if url == "" {
+		return "http://127.0.0.1:8484"
+	}
+	return url
 }

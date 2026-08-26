@@ -19,6 +19,7 @@ func newClientFromEnv() *client.Client {
 }
 
 func runList(_ []string) int {
+	ensureDaemonAuto()
 	api := newClientFromEnv()
 	workspaces, err := api.ListWorkspaces(context.Background())
 	if err != nil {
@@ -50,6 +51,7 @@ func runRemove(args []string) int {
 	}
 
 	api := newClientFromEnv()
+	ensureDaemonAuto()
 	failed := false
 	for _, id := range args {
 		if err := api.DeleteWorkspace(context.Background(), id); err != nil {

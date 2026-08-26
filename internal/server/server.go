@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/peelar/scraps/internal/store"
 	"github.com/peelar/scraps/internal/version"
@@ -31,6 +32,7 @@ type Server struct {
 	token    string
 	handler  http.Handler
 	dataDir  string
+	started  time.Time
 	shutdown func()
 }
 
@@ -58,6 +60,7 @@ func New(config Config) (*Server, error) {
 		manager:  manager,
 		token:    config.Token,
 		dataDir:  config.DataDir,
+		started:  time.Now(),
 		shutdown: func() { st.Close() },
 	}
 	server.handler = server.routes()
@@ -73,7 +76,7 @@ func (s *Server) Handler() http.Handler { return s.handler }
 func (s *Server) routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", health)
-	mux.HandleFunc("GET /v1/info", s.requireAuth(info))
+	mux.HandleFunc("GET /v1/info", s.requireAuth(info(s)))
 
 	mux.HandleFunc("POST /v1/workspaces", s.requireAuth(s.createWorkspace))
 	mux.HandleFunc("GET /v1/workspaces", s.requireAuth(s.listWorkspaces))
@@ -100,18 +103,26 @@ func health(response http.ResponseWriter, _ *http.Request) {
 	_, _ = response.Write([]byte("ok\n"))
 }
 
-func info(response http.ResponseWriter, _ *http.Request) {
-	writeJSON(response, http.StatusOK, infoResponse{
-		Name:    "scrapd",
-		Version: version.Version,
-		Commit:  version.Commit,
-	})
+func info(server *Server) http.HandlerFunc {
+	return func(response http.ResponseWriter, _ *http.Request) {
+		writeJSON(response, http.StatusOK, infoResponse{
+			Name:      "scrapd",
+			Version:   version.Version,
+			Commit:    version.Commit,
+			DataDir:   server.dataDir,
+			StartedAt: server.started.UTC().Format(time.RFC3339),
+			PID:       os.Getpid(),
+		})
+	}
 }
 
 type infoResponse struct {
-	Name    string `json:"name"`
-	Version string `json:"version"`
-	Commit  string `json:"commit"`
+	Name      string `json:"name"`
+	Version   string `json:"version"`
+	Commit    string `json:"commit"`
+	DataDir   string `json:"dataDir"`
+	StartedAt string `json:"startedAt"`
+	PID       int    `json:"pid"`
 }
 
 // requireAuth enforces the bearer token when one is configured.

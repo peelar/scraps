@@ -16,6 +16,9 @@ Commands:
   pi [prompt]   Start Pi in a fresh workspace (see scrap pi --help)
   ls            List workspaces
   rm <id>...    Remove workspaces
+  up            Ensure the local scrapd daemon is running
+  down          Stop the local scrapd daemon
+  status        Show daemon and workspace status
   setup         Configure self-hosted infrastructure (not implemented)
   auth          Configure credentials (not implemented)
   attach        Attach to a workspace (not implemented)
@@ -51,6 +54,12 @@ func run(args []string) int {
 		return runList(rest)
 	case "rm":
 		return runRemove(rest)
+	case "up":
+		return runUp(rest)
+	case "down":
+		return runDown(rest)
+	case "status":
+		return runStatus(rest)
 	default:
 		fmt.Fprintf(os.Stderr, "scrap: command %q is not implemented yet\n", command)
 		return 1

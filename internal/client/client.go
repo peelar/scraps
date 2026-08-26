@@ -89,16 +89,31 @@ func (c *Client) do(ctx context.Context, method, path string, body any, out any)
 
 // Ping checks daemon reachability.
 func (c *Client) Ping(ctx context.Context) error {
-	var info struct {
-		Name string `json:"name"`
-	}
-	if err := c.do(ctx, http.MethodGet, "/v1/info", nil, &info); err != nil {
+	info, err := c.Info(ctx)
+	if err != nil {
 		return err
 	}
 	if info.Name != "scrapd" {
 		return fmt.Errorf("unexpected daemon %q at %s", info.Name, c.baseURL)
 	}
 	return nil
+}
+
+// InfoResponse is the daemon identity payload from /v1/info.
+type InfoResponse struct {
+	Name      string `json:"name"`
+	Version   string `json:"version"`
+	Commit    string `json:"commit"`
+	DataDir   string `json:"dataDir"`
+	StartedAt string `json:"startedAt"`
+	PID       int    `json:"pid"`
+}
+
+// Info fetches daemon identity.
+func (c *Client) Info(ctx context.Context) (InfoResponse, error) {
+	var info InfoResponse
+	err := c.do(ctx, http.MethodGet, "/v1/info", nil, &info)
+	return info, err
 }
 
 // CreateWorkspace creates a workspace, cloning repoURL when given.
