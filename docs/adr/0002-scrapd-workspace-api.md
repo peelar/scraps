@@ -79,7 +79,9 @@ provide process isolation.
   file paths). Sandboxed providers mount the workspace at `/workspace`. The
   trusted directory provider emulates that root and redacts its host path from
   command output.
-- `env` entries are added on top of the daemon's environment.
+- Providers construct a minimal environment from scratch; explicit `env`
+  entries are request-scoped overrides. The daemon environment is never
+  inherited wholesale (ADR 0004).
 - `timeoutMs` caps execution server-side (default none, hard cap 1 hour).
 
 The response is `application/x-ndjson`, flushed per event:
@@ -142,8 +144,8 @@ All take `{path, ...}` with workspace-relative validated paths:
   walks the tree ignoring `.git`/`node_modules`/`.DS_Store`, and does not yet
   respect `.gitignore` or other ripgrep niceties. Fidelity improves later if
   agent workflows demand it.
-- exec inherits the daemon's environment plus request overrides; a minimal
-  environment arrives with workspace templating (M2).
+- exec uses the provider-defined minimal environment plus explicit request
+  overrides; daemon credentials and unrelated variables are absent (ADR 0004).
 - Path validation cleans lexically and evaluates symlinks of existing
   components; a symlink created mid-session inside the workspace pointing out
   of it is accepted M1 risk on the local provider.
@@ -188,7 +190,8 @@ explicit client support.
 ## Follow-up work
 
 1. `.gitignore`-aware search (M2, likely via ripgrep on the host).
-2. exec environment policy and credential brokering (M2/M3).
+2. Scoped credential brokering (the minimal exec environment is implemented;
+   see ADR 0004).
 3. Sleeping/automatic-idle lifecycle policy (M4/M6); explicit start/stop is implemented.
 4. Add provider-specific enforcement that `/workspace` is the real mounted
    root rather than directory-provider emulation.
