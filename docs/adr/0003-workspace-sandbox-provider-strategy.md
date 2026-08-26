@@ -3,10 +3,11 @@
 - Status: Accepted
 - Date: 2026-08-24
 
-> ADR 0008 supersedes the default-provider and production topology portions of
-> this decision: OpenShell is now the default control plane, with a shared
-> container pool inside one protective Proxmox VM. The provider boundary,
-> directory-mode warning, and direct-Docker baseline remain applicable.
+> ADRs 0008 and 0009 supersede the default-provider and production-topology
+> portions of this decision: OpenShell is the default control plane, with a
+> shared container pool inside one ordinary Linux worker VM. Proxmox is one
+> future VM host, not a requirement. The provider boundary, directory-mode
+> warning, and direct-Docker baseline remain applicable.
 
 ## Context
 
@@ -22,9 +23,9 @@ computer. It must safely run untrusted repository code, package install hooks,
 tests, browsers, development servers, and Docker workloads without granting
 those processes access to the developer machine or neighboring workspaces.
 
-The target deployment in `SPEC.md` is one self-hosted Proxmox installation.
-We also need a fast intermediate step that makes the provider abstraction and
-Linux environment real without requiring Proxmox for every development cycle.
+The original target in `SPEC.md` was one self-hosted Proxmox installation with
+a VM per workspace. ADRs 0008 and 0009 replace that topology with one portable
+worker VM containing a shared OpenShell container pool.
 
 Pi itself remains local per ADR 0001. Its TUI, provider credentials, sessions,
 skills, and prompts are not part of the workspace sandbox. Project-facing tools
@@ -43,14 +44,10 @@ Scraps will implement three providers in this order:
    storage, lifecycle, resource limits, and exec semantics with short feedback
    loops. Docker Desktop, OrbStack, and a native Linux Docker Engine are
    acceptable runtimes behind the same provider.
-3. **Proxmox VM provider** — the production self-hosted target. A workspace is
-   a VM cloned from a prepared template, providing a stronger tenant boundary
-   and supporting Docker, browsers, services, and arbitrary project tooling
-   without depending on nested-container behavior.
-
-Proxmox LXC is not the production default. It is efficient, but shares the host
-kernel and complicates nested Docker and workload policy. It may be evaluated
-later as an optional provider after the VM path works.
+3. **OpenShell provider inside a worker VM** — selected by ADRs 0008 and 0009.
+   A shared ordinary Linux VM provides the host-protection boundary while
+   OpenShell containers provide economical per-workspace lifecycle and policy.
+   Lima is the first worker-VM driver; Proxmox may host the same worker later.
 
 ### Provider boundary
 
@@ -95,15 +92,13 @@ The Docker provider is a development bridge, not the final multi-tenant
 security claim. Its threat model and runtime dependencies must be visible in
 status and workspace metadata.
 
-### Proxmox VM baseline
+### Worker VM baseline
 
-The production provider will use prepared Linux VM templates and Proxmox
-clone/snapshot primitives. Each workspace receives its own VM boundary,
-persistent workspace disk, resource limits, and private network identity.
-`scrapd` will communicate with a small workspace agent or another structured
-transport; it will not construct arbitrary SSH command strings in HTTP
-handlers. Template, clone, readiness, credential brokering, and reconciliation
-behavior require a follow-up Proxmox-specific ADR before implementation.
+The worker VM is outside the workspace-provider boundary: it contains `scrapd`,
+OpenShell, the runtime, and many workspace containers. Workspace records do not
+name its hypervisor. Local Lima and a future remote Proxmox deployment carry the
+same worker payload; transport, readiness, persistence, and reconciliation are
+deployment-driver concerns. See ADR 0009.
 
 ### Provider-neutral paths
 
@@ -126,10 +121,10 @@ replacements.
 
 ### Positive
 
-- Docker provides a near-term real Linux environment without coupling the API
-  to Proxmox during early development.
-- Proxmox VMs match the product model of an isolated development computer and
-  allow nested project tooling without sharing the Proxmox kernel boundary.
+- Docker provides a real Linux workspace environment without coupling the API
+  to a particular hypervisor.
+- An ordinary worker VM gives the whole agent pool a kernel boundary from the
+  developer or homelab host without paying for one VM per workspace.
 - The local Pi experience retains user skills and credentials while repository
   code runs behind a sandbox boundary.
 - Provider-neutral paths and operations avoid leaking host/container layout to
@@ -137,8 +132,8 @@ replacements.
 
 ### Negative
 
-- Docker and Proxmox providers have different lifecycle and security semantics;
-  capability differences must be represented rather than hidden.
+- Workspace-container and outer worker-VM lifecycle have different semantics;
+  deployment state must not leak into the provider contract.
 - The provider-neutral path contract requires daemon and extension versions
   that explicitly agree; mixed transitional/current versions fail closed.
 - Filesystem APIs may need a workspace agent, archive protocol, or runtime exec
@@ -161,18 +156,12 @@ replacements.
 
 ## Alternatives considered
 
-### Move directly from directories to Proxmox VMs
+### Require Proxmox or use one VM per workspace
 
-This minimizes temporary provider work but makes every API/provider iteration
-depend on remote infrastructure, slowing development. Docker is useful as a
-local contract test and development environment even after Proxmox exists.
-
-### Proxmox LXC as the production default
-
-LXC starts quickly and uses resources efficiently, but shares the Proxmox host
-kernel and complicates nested Docker and some development workloads. It may be
-added as an optional optimization, not the initial production isolation
-boundary.
+Rejected by ADR 0009. Requiring a management platform makes local use needlessly
+heavy, and one VM per workspace spends resources and startup time without a
+corresponding need in the current single-user threat model. Proxmox remains a
+possible host for the shared worker VM.
 
 ### Run Pi inside every sandbox
 
@@ -199,8 +188,6 @@ sync flows.
    policies.
 5. Define the Pi resource policy that preserves skills/prompts while governing
    executable global extensions and additional tools.
-6. Write a Proxmox VM provider ADR covering API authentication, templates,
-   linked/full clones, workspace agent transport, networking, readiness,
-   snapshots, reconciliation, and failure recovery.
-7. Implement the Proxmox VM provider after project setup snapshots and identity
-   brokering have stable contracts.
+6. Stabilize the generic worker bundle, remote authentication, networking,
+   readiness, persistence, reconciliation, and failure-recovery contract.
+7. Implement a Proxmox deployment driver after that generic contract is stable.

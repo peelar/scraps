@@ -35,6 +35,9 @@ type Options struct {
 	ScrapdPath string
 	// ExtraEnv is added to the spawn environment (tests).
 	ExtraEnv []string
+	// External marks a loopback tunnel as remotely managed (for example, the
+	// local worker VM). The client may connect, but must not spawn or kill it.
+	External bool
 }
 
 // Manager owns the lifecycle of one local scrapd.
@@ -87,7 +90,7 @@ func New(opts Options) (*Manager, error) {
 		pidFile: filepath.Join(home, fmt.Sprintf("scrapd-%s.pid", port)),
 		logFile: filepath.Join(home, fmt.Sprintf("scrapd-%s.log", port)),
 	}
-	manager.local = isLoopback(host)
+	manager.local = isLoopback(host) && !opts.External
 	return manager, nil
 }
 

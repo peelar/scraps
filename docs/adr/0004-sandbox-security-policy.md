@@ -10,9 +10,9 @@ secrets, exhaust the machine, expose services, download malicious dependencies,
 or leave processes behind even when it runs in a container or VM. Scraps needs
 defaults that are enforceable by providers and visible to operators.
 
-This ADR defines the baseline for the directory, Docker, and Proxmox VM
-providers. ADR 0003 still governs provider selection and accurately labels the
-directory provider as unisolated.
+This ADR defines the baseline for directory and container workspace providers,
+plus the ordinary worker-VM deployment boundary selected by ADR 0009. ADR 0003
+still accurately labels the directory provider as unisolated.
 
 ## Threat model
 
@@ -37,7 +37,7 @@ but deterministic limits remain required for sandbox providers.
 | --- | --- | --- |
 | Directory | path validation only | Trusted development convenience. Commands are host processes and can deliberately access anything available to the daemon user. |
 | Docker | unprivileged container sharing the host kernel | Local sandbox against ordinary repository code, not a hostile multi-tenant or kernel-exploit boundary. |
-| Proxmox VM | dedicated VM kernel and disks | Production isolation target; Proxmox management and the workspace agent remain trusted infrastructure. |
+| OpenShell in worker VM | unprivileged workspace container inside a dedicated VM kernel and disk | Default single-user target; the selected hypervisor, VM integration, OpenShell, and `scrapd` remain trusted infrastructure. |
 
 No provider claim protects against vulnerabilities in its runtime, host kernel,
 hypervisor, workspace agent, or `scrapd` itself.
@@ -81,9 +81,9 @@ remote. Other services require their own explicit broker policy.
   access; inbound host publishing disabled; container-to-container and private
   host/LAN access denied where the runtime supports enforceable rules. DNS is
   provided by the managed sandbox network. No ports are published implicitly.
-- **Proxmox VM default:** private per-workspace identity with outbound internet
-  through controlled NAT; no unsolicited inbound connectivity and no access to
-  management networks or neighboring workspaces.
+- **Worker VM/OpenShell default:** workspace egress follows explicit OpenShell
+  policy; no implicit inbound publishing, host mounts, management-network
+  access, or access to neighboring workspaces.
 
 Exceptions (published ports, private destinations, or disabled outbound access)
 must be explicit configuration tied to a workspace, shown by diagnostics, and
@@ -114,9 +114,10 @@ CPU, memory, PID, disk, and network controls as host-unlimited. Descendants that
 escape the process group are possible; directory mode is not suitable for
 untrusted code.
 
-Proxmox limits follow the same categories but are enforced through VM CPU,
-memory, disk, firewall, and agent process controls. Exact defaults may be
-revised in the Proxmox-specific ADR.
+The outer worker VM also has explicit CPU, memory, and disk limits enforced by
+its selected hypervisor. These bound the whole pool rather than replacing
+per-workspace OpenShell limits. Driver-specific firewall and storage controls
+must be reported honestly.
 
 ### Images and updates
 

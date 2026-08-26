@@ -114,6 +114,10 @@ func TestLocalVsRemote(t *testing.T) {
 	if err != nil || remote.IsLocal() {
 		t.Fatalf("remote host must not be managed: %v %v", remote, err)
 	}
+	tunnel, err := New(Options{URL: "http://127.0.0.1:8484", HomeDir: t.TempDir(), External: true})
+	if err != nil || tunnel.IsLocal() {
+		t.Fatalf("external loopback tunnel must not be managed: %v %v", tunnel, err)
+	}
 }
 
 func TestStartStopRoundTrip(t *testing.T) {

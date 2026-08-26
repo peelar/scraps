@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/peelar/scraps/internal/githubauth"
 	"github.com/peelar/scraps/internal/store"
 	"github.com/peelar/scraps/internal/workspace"
 )
@@ -64,7 +65,13 @@ func (o *OpenShell) Create(ctx context.Context, opt workspace.CreateOptions) (wo
 		if taken {
 			continue
 		}
-		args := []string{"sandbox", "create", "--name", id, "--from", o.image, "--cpu", "2", "--memory", "4Gi", "--label", "dev.scraps.workspace=" + id, "--no-auto-providers", "--detach", "--", "sleep", "infinity"}
+		args := []string{"sandbox", "create", "--name", id, "--from", o.image, "--cpu", "2", "--memory", "4Gi", "--label", "dev.scraps.workspace=" + id}
+		// A configured provider contains the brokered credential in OpenShell;
+		// the sandbox receives only rewritten requests, never the PAT itself.
+		if _, providerErr := o.run(ctx, nil, "provider", "get", githubauth.ProfileID); providerErr == nil {
+			args = append(args, "--provider", githubauth.ProfileID)
+		}
+		args = append(args, "--no-auto-providers", "--detach", "--", "sleep", "infinity")
 		if _, err = o.run(ctx, nil, args...); err != nil {
 			// OpenShell may persist a sandbox in Error phase even though create
 			// returns non-zero. Reclaim it before surfacing the failure.

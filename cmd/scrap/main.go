@@ -13,7 +13,6 @@ Usage:
   scrap <command> [arguments]
 
 Commands:
-  pi [prompt]   Start Pi in a fresh workspace (see scrap pi --help)
   ls            List workspaces
   start <id>    Start a stopped workspace
   stop <id>     Stop a running workspace
@@ -22,7 +21,7 @@ Commands:
   down          Stop the local scrapd daemon
   status        Show daemon and workspace status
   setup         Install/check OpenShell and build the workspace image
-  auth          Configure credentials (not implemented)
+  auth github   Configure a brokered GitHub push credential
   attach        Attach to a workspace (not implemented)
   ssh           Open a workspace shell (not implemented)
   open          Open a project preview (not implemented)
@@ -50,8 +49,6 @@ func run(args []string) int {
 	case "version", "--version", "-v":
 		fmt.Println(version.String("scrap"))
 		return 0
-	case "pi":
-		return runPi(rest)
 	case "ls":
 		return runList(rest)
 	case "start", "stop":
@@ -60,6 +57,8 @@ func run(args []string) int {
 		return runRemove(rest)
 	case "setup":
 		return runSetup(rest)
+	case "auth":
+		return runAuth(rest)
 	case "up":
 		return runUp(rest)
 	case "down":

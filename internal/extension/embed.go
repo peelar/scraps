@@ -1,5 +1,5 @@
-// Package extension embeds the Scraps Pi extension and extracts it to disk
-// so `scrap pi` can pass a filesystem path to `pi -e`.
+// Package extension embeds the Scraps Pi extension so `scrap setup` can
+// install the global /scrap command without a source checkout.
 //
 // The files under files/ are synced from packages/pi-extension/src by
 // `make sync-extension` (wired into `make build`); commit the synced copy so

@@ -27,7 +27,7 @@ func runList(_ []string) int {
 		return 1
 	}
 	if len(workspaces) == 0 {
-		fmt.Println("no workspaces — start one with: scrap pi")
+		fmt.Println("no workspaces — open Pi and run: /scrap")
 		return 0
 	}
 

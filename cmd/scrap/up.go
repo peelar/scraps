@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/peelar/scraps/internal/daemon"
@@ -14,7 +15,7 @@ const upUsage = `usage: scrap up [--restart]
 
 Ensure a local scrapd is running: start it if stopped, kill and restart a
 hung or stale instance (binary newer than the daemon), and report status.
-scrap pi and other commands do this automatically; ` + "`scrap up`" + ` is the
+Workspace commands may do this automatically; ` + "`scrap up`" + ` is the
 explicit, verbose entry point.
 `
 
@@ -185,25 +186,42 @@ func printWorkspaceSummary(manager *daemon.Manager) {
 	}
 	switch len(workspaces) {
 	case 0:
-		fmt.Println("  no workspaces yet — start one with: scrap pi")
+		fmt.Println("  no workspaces yet — open Pi and run: /scrap")
 	case 1:
-		fmt.Printf("  1 workspace (%s) — attach with: scrap pi --workspace %s\n", workspaces[0].ID, workspaces[0].ID)
+		fmt.Printf("  1 workspace (%s) — attach in Pi with: /scrap-select %s\n", workspaces[0].ID, workspaces[0].ID)
 	default:
 		fmt.Printf("  %d workspaces — list with: scrap ls\n", len(workspaces))
 	}
 }
 
+func daemonURLFromEnv() string {
+	if url := os.Getenv("SCRAP_DAEMON_URL"); url != "" {
+		return url
+	}
+	return "http://127.0.0.1:8484"
+}
+
 // managerFromEnv builds a supervisor for the configured daemon URL.
 func managerFromEnv() (*daemon.Manager, error) {
+	url := daemonURLFromEnv()
 	return daemon.New(daemon.Options{
-		URL:   daemonURLFromEnv(),
-		Token: os.Getenv("SCRAP_TOKEN"),
+		URL:      url,
+		Token:    os.Getenv("SCRAP_TOKEN"),
+		External: url == "http://127.0.0.1:8484" && workerVMMarkerExists(),
 	})
 }
 
+func workerVMMarkerExists() bool {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return false
+	}
+	_, err = os.Stat(filepath.Join(home, ".scrap", "worker-vm"))
+	return err == nil
+}
+
 // ensureDaemonAuto best-effort starts a stopped local daemon (never
-// restarts anything). Called by commands that need the API so `scrap pi`
-// works without pre-starting scrapd.
+// restarts anything). Called by workspace commands that need the API.
 func ensureDaemonAuto() {
 	manager, err := managerFromEnv()
 	if err != nil || !manager.IsLocal() {

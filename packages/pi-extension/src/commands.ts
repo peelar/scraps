@@ -4,8 +4,11 @@
  * outside remote mode they explain that `--scrap` is required.
  */
 
+import path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
+import { DEFAULT_DAEMON_URL } from "./client.ts";
+import type { RemoteConfig } from "./identity.ts";
 import { describeError, describeSession, type WorkspaceSession } from "./workspace.ts";
 
 /** Minimal UI surface the commands need (satisfied by ExtensionContext.ui). */
@@ -18,6 +21,7 @@ export function registerScrapCommands(
 	pi: ExtensionAPI,
 	session: WorkspaceSession,
 	refreshStatus: (ui: Ui) => void,
+	activateRemote: (config: RemoteConfig) => void,
 ): void {
 	const requireRemote = (ui: Ui): boolean => {
 		if (!session.remoteMode) {
@@ -28,9 +32,41 @@ export function registerScrapCommands(
 	};
 
 	pi.registerCommand("scrap", {
-		description: "Show Scraps workspace status",
-		handler: async (_args, ctx) => {
-			ctx.ui.notify(describeSession(session), session.remoteMode ? "info" : "warning");
+		description: "Start using a fresh remote Scraps workspace",
+		handler: async (args, ctx) => {
+			if (session.connectedWorkspace !== undefined) {
+				ctx.ui.notify(describeSession(session), "info");
+				return;
+			}
+
+			if (!session.remoteMode) {
+				activateRemote({
+					daemonUrl: process.env.SCRAP_DAEMON_URL ?? DEFAULT_DAEMON_URL,
+					workspaceId: process.env.SCRAP_WORKSPACE_ID,
+					project: process.env.SCRAP_PROJECT,
+					token: process.env.SCRAP_TOKEN,
+				});
+				refreshStatus(ctx.ui);
+			}
+
+			try {
+				const configuredWorkspace = session.workspaceId;
+				const workspace =
+					configuredWorkspace === undefined
+						? await session.create(
+								args.trim() || session.project || path.basename(ctx.cwd) || "workspace",
+							)
+						: await session.connect(configuredWorkspace);
+				refreshStatus(ctx.ui);
+				ctx.ui.notify(`Connected to Scraps workspace ${workspace.id}.`, "info");
+			} catch (error) {
+				refreshStatus(ctx.ui);
+				ctx.ui.notify(
+					`Cannot start Scraps workspace: ${describeError(error)}. ` +
+						"Start the daemon with `scrap up`, then run /scrap again.",
+					"error",
+				);
+			}
 		},
 	});
 

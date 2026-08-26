@@ -8,10 +8,10 @@ Cloud coding agents such as Cursor Cloud Agents, Amp Orbs, and similar systems f
 
 **Scraps aims to reproduce that feeling on self-hosted infrastructure.**
 
-A developer should be able to run:
+A developer should be able to open Pi and run:
 
-```bash
-scrap pi "investigate this flaky checkout test"
+```text
+/scrap investigate this flaky checkout test
 ```
 
 and, within seconds, have Pi working inside a fresh isolated Linux computer on their own infrastructure, with the repository, dependencies, GitHub access, browser, and development environment already prepared.
@@ -20,25 +20,28 @@ The user should think **“spawn another agent”**, not **“provision another 
 
 ## Core UX
 
-The CLI is the primary product surface.
+Pi is the primary interactive product surface:
 
-```bash
-scrap setup                 # configure self-hosted infrastructure
-scrap auth github           # authenticate once
-
-scrap pi                    # interactive Pi in a fresh workspace
-scrap pi "fix issue #123"   # create workspace + start task
-
-scrap ls
-scrap attach <workspace>
-scrap ssh <workspace>
-scrap open <workspace>      # open project preview
-scrap diff <workspace>
-scrap sync <workspace>
-scrap rm <workspace>
+```text
+/scrap                     # create and activate a fresh workspace
+/scrap fix issue #123      # create a named/task-oriented workspace
+/scrap-select <workspace>  # attach this Pi session to an existing workspace
 ```
 
-The interface should remain largely stable even as the implementation evolves.
+The CLI manages infrastructure and workspace environments:
+
+```bash
+scrap setup
+scrap up
+scrap status
+scrap ls
+scrap start <workspace>
+scrap stop <workspace>
+scrap rm <workspace>
+scrap down
+```
+
+The interfaces should remain largely stable even as the implementation evolves.
 
 ## Core Model
 
@@ -99,19 +102,20 @@ Developer machine
           │
           │ private network / Tailscale
           ▼
-scrapd                        Go
+ordinary Linux worker VM
+├── scrapd                    Go
+├── OpenShell gateway
 ├── workspace lifecycle
 ├── project environments
 ├── GitHub credentials
 ├── persistence              SQLite
-└── compute provider
-          │
-          ▼
-Proxmox
-└── isolated workspace VMs
+└── OpenShell container pool
 ```
 
-Initial infrastructure target: **one Proxmox installation**.
+Initial infrastructure target: **one ordinary Linux worker VM** containing many
+cheap workspace containers. Lima is the first local VM driver. The same worker
+may later run as a VM on Proxmox or another remote hypervisor; users do not need
+Proxmox to run Scraps.
 
 Use existing virtualization and security primitives. Scraps must **not** implement its own VM/container isolation.
 
@@ -128,7 +132,9 @@ type Provider interface {
 }
 ```
 
-Start with a static/fake provider if useful, then implement Proxmox.
+Start with local VM deployment and keep the worker-host mechanism replaceable.
+A Proxmox deployment driver may be implemented later without changing workspace
+or client contracts.
 
 ## Pi First
 
@@ -176,8 +182,9 @@ Run Pi against one manually prepared remote Linux machine. Validate that the int
 **M3 — Identity**
 One-time GitHub authentication; `git` and `gh` work automatically inside workspaces.
 
-**M4 — Proxmox isolation**
-Replace shared directories with one VM per workspace using templates/clones.
+**M4 — Worker VM isolation**
+Run the shared OpenShell/container pool inside an ordinary protective Linux VM;
+start with Lima locally and keep Proxmox as a future remote target.
 
 **M5 — Fast startup**
 Snapshots, linked clones/COW, warm caches and—only if necessary—warm machines. Optimize until spawning another agent feels cheap.
@@ -201,6 +208,6 @@ No Kubernetes, federation, billing, public compute marketplace, multi-user contr
 
 Build the smallest prototype that proves:
 
-> **From a local terminal, `scrap pi` starts a normal-feeling Pi session whose entire development computer lives on a self-hosted machine—and using it feels easier than managing another local worktree.**
+> **In ordinary local Pi, `/scrap` activates a development computer on self-hosted infrastructure—and using it feels easier than managing another local worktree.**
 
 Everything else should be evaluated against whether it moves Scraps toward that experience.

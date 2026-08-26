@@ -1,11 +1,10 @@
 /**
  * Extension identity resolution.
  *
- * ADR 0001: the canonical interactive integration runs Pi locally and replaces
- * the seven project-facing tools only behind an explicit `--scrap` flag. The
- * `scrap pi` convenience launcher is expected to start Pi with `--scrap` (and
- * usually `--workspace <id>`) while injecting the remaining identity through
- * `SCRAP_*` environment variables.
+ * ADR 0001: the canonical interactive integration runs Pi locally. `/scrap`
+ * activates the seven remote project-facing tools dynamically. The `--scrap`
+ * and `--workspace` flags remain compatible startup inputs for internal and
+ * test use.
  */
 
 import { DEFAULT_DAEMON_URL } from "./client.ts";
@@ -42,10 +41,9 @@ function asString(value: unknown): string | undefined {
 /**
  * Decide whether this Pi process runs in remote-workspace mode.
  *
- * Remote mode is fail-closed by construction: it is only entered through the
- * explicit `--scrap` flag, and an unreachable daemon still counts as remote
- * so that the replaced tools error visibly instead of silently touching the
- * local machine.
+ * Startup remote mode is fail-closed by construction: an unreachable daemon
+ * still counts as remote so replaced tools error visibly instead of silently
+ * touching the local machine. `/scrap` may activate the same mode later.
  */
 export function resolveMode(inputs: IdentityInputs): ExtensionMode {
 	if (inputs.flags.scrap !== true) {
@@ -55,7 +53,7 @@ export function resolveMode(inputs: IdentityInputs): ExtensionMode {
 	return {
 		kind: "remote",
 		config: {
-			// ADR 0002: base URL default http://127.0.0.1:8484; `scrap pi`
+			// ADR 0002: base URL default http://127.0.0.1:8484; `/scrap`
 			// always sets SCRAP_DAEMON_URL explicitly.
 			daemonUrl: asString(inputs.env.SCRAP_DAEMON_URL) ?? DEFAULT_DAEMON_URL,
 			workspaceId:

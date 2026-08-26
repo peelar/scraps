@@ -3,15 +3,9 @@
  *
  * Runs Pi locally with all project-facing tools (bash, read, write, edit,
  * ls, find, grep) executing in a remote Scraps workspace controlled by the
- * scrapd daemon. The extension is dormant unless Pi is started with the
- * explicit `--scrap` flag:
- *
- *   pi --scrap
- *   pi --scrap --workspace <workspace>
- *
- * The `scrap pi` CLI is a convenience launcher that resolves or creates a
- * workspace and starts local Pi with this extension and workspace identity
- * (SCRAP_DAEMON_URL, SCRAP_WORKSPACE_ID, SCRAP_PROJECT, SCRAP_TOKEN).
+ * scrapd daemon. In ordinary Pi, `/scrap` activates remote mode and creates a
+ * workspace; `/scrap-select` attaches an existing one. `--scrap` remains an
+ * internal compatibility flag, not the public launcher UX.
  *
  * While remote mode is active the extension fails closed: without a verified
  * workspace connection every replaced tool reports a visible error and never
@@ -48,7 +42,17 @@ export default function scrapsExtension(pi: ExtensionAPI): void {
 		ui.setStatus(STATUS_KEY, statusText(session));
 	};
 
-	registerScrapCommands(pi, session, refreshStatus);
+	const activateRemote = (config: Parameters<WorkspaceSession["configure"]>[0]) => {
+		session.configure(config);
+		if (!toolsRegistered) {
+			registerRemoteTools(pi, session);
+			const active = pi.getActiveTools();
+			pi.setActiveTools([...new Set([...active, ...REMOTE_TOOL_NAMES])]);
+			toolsRegistered = true;
+		}
+	};
+
+	registerScrapCommands(pi, session, refreshStatus, activateRemote);
 
 	pi.on("session_start", async (_event, ctx) => {
 		// CLI flags are not available during the factory; resolve identity now.
@@ -65,17 +69,7 @@ export default function scrapsExtension(pi: ExtensionAPI): void {
 			return;
 		}
 
-		session.configure(mode.config);
-		if (!toolsRegistered) {
-			registerRemoteTools(pi, session);
-			// `scrap pi` starts Pi with --no-builtin-tools (ADR 0002) so a
-			// failed extension load leaves no filesystem tools at all. With no
-			// built-ins to override, freshly registered tools are not active
-			// until activated explicitly.
-			const active = pi.getActiveTools();
-			pi.setActiveTools([...new Set([...active, ...REMOTE_TOOL_NAMES])]);
-			toolsRegistered = true;
-		}
+		activateRemote(mode.config);
 
 		if (mode.config.workspaceId !== undefined) {
 			try {

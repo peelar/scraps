@@ -1,0 +1,115 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+VM_NAME=${SCRAPS_VM_NAME:-scraps}
+usage() {
+  cat <<EOF
+usage: scripts/worker-vm <up|stop|delete|status|shell>
+
+Manage the local Lima worker VM. Set SCRAPS_VM_NAME to use a different instance.
+EOF
+}
+
+require_lima() {
+  if ! command -v limactl >/dev/null 2>&1; then
+    echo "scraps: Lima 2.0+ is required for the local worker VM" >&2
+    echo "install it from https://lima-vm.io/ and rerun 'make up'" >&2
+    exit 1
+  fi
+}
+
+vm_status() {
+  limactl list "$VM_NAME" --format '{{.Status}}' 2>/dev/null || true
+}
+
+start_vm() {
+  local status
+  status=$(vm_status)
+  case "$status" in
+    Running) ;;
+    Stopped) limactl start "$VM_NAME" ;;
+    *) limactl start --name "$VM_NAME" "$ROOT/vm/lima.yaml" ;;
+  esac
+}
+
+guest_arch() {
+  case "$(limactl shell "$VM_NAME" uname -m)" in
+    x86_64) echo amd64 ;;
+    aarch64|arm64) echo arm64 ;;
+    *) echo "scraps: unsupported worker VM architecture" >&2; exit 1 ;;
+  esac
+}
+
+build_bundle() {
+  local stage=$1 arch=$2
+  mkdir -p "$stage/bin"
+  (cd "$ROOT" && CGO_ENABLED=0 GOOS=linux GOARCH="$arch" go build -trimpath -o "$stage/bin/scrap" ./cmd/scrap)
+  (cd "$ROOT" && CGO_ENABLED=0 GOOS=linux GOARCH="$arch" go build -trimpath -o "$stage/bin/scrapd" ./cmd/scrapd)
+}
+
+copy_bundle() {
+  local stage=$1
+  tar -C "$stage" -czf - . | limactl shell "$VM_NAME" bash -c \
+    'rm -rf "$HOME/.cache/scraps/deploy.new"; mkdir -p "$HOME/.cache/scraps/deploy.new"; tar -xzf - -C "$HOME/.cache/scraps/deploy.new"; rm -rf "$HOME/.cache/scraps/deploy"; mv "$HOME/.cache/scraps/deploy.new" "$HOME/.cache/scraps/deploy"'
+}
+
+deploy_guest() {
+  limactl shell "$VM_NAME" bash -s <<'GUEST'
+set -euo pipefail
+cd "$HOME/.cache/scraps/deploy"
+mkdir -p "$HOME/.local/bin" "$HOME/.config/openshell"
+install -m 0755 bin/scrap bin/scrapd "$HOME/.local/bin/"
+export PATH="$HOME/.local/bin:$PATH"
+cat >"$HOME/.config/openshell/gateway.toml" <<EOF
+[openshell.gateway]
+compute_drivers = ["docker"]
+
+[openshell.drivers.docker]
+socket_path = "/run/user/$(id -u)/docker.sock"
+EOF
+# A previous failed install may have left the gateway restart-looping before
+# this explicit rootless socket configuration existed.
+systemctl --user restart openshell-gateway.service 2>/dev/null || true
+scrap setup
+scrap up --restart
+GUEST
+}
+
+up() {
+  require_lima
+  start_vm
+  local stage arch
+  stage=$(mktemp -d)
+  trap 'rm -rf "$stage"' EXIT
+  arch=$(guest_arch)
+  echo "building Scraps worker bundle for linux/$arch..."
+  build_bundle "$stage" "$arch"
+  copy_bundle "$stage"
+  deploy_guest
+  mkdir -p "$HOME/.scrap"
+  touch "$HOME/.scrap/worker-vm"
+  echo "Scraps worker VM ready -> http://127.0.0.1:8484"
+}
+
+case "${1:-}" in
+  up) up ;;
+  stop)
+    require_lima
+    [[ "$(vm_status)" == Running ]] && limactl stop "$VM_NAME" || true
+    ;;
+  delete)
+    require_lima
+    [[ -n "$(vm_status)" ]] && limactl delete --force "$VM_NAME" || true
+    ;;
+  status)
+    require_lima
+    status=$(vm_status)
+    echo "${status:-Not created}"
+    ;;
+  shell)
+    require_lima
+    limactl shell "$VM_NAME"
+    ;;
+  *) usage >&2; exit 2 ;;
+esac
