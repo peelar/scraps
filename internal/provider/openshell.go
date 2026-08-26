@@ -99,6 +99,52 @@ func (o *OpenShell) Create(ctx context.Context, opt workspace.CreateOptions) (wo
 	}
 	return workspace.Workspace{}, errors.New("could not generate a unique workspace id")
 }
+func (o *OpenShell) Ready(ctx context.Context) ([]workspace.Workspace, error) {
+	rows, err := o.store.ListWorkspaces(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var out []workspace.Workspace
+	for _, w := range rows {
+		if w.Provider == "openshell" && w.State == "preheated" {
+			out = append(out, publicWorkspace(w))
+		}
+	}
+	return out, nil
+}
+
+func (o *OpenShell) Preheat(ctx context.Context) (workspace.Workspace, error) {
+	created, err := o.Create(ctx, workspace.CreateOptions{})
+	if err != nil {
+		return workspace.Workspace{}, err
+	}
+	if err := o.store.UpdateWorkspaceState(ctx, created.ID, "preheated"); err != nil {
+		_ = o.Delete(context.Background(), created.ID)
+		return workspace.Workspace{}, err
+	}
+	created.State = "preheated"
+	return created, nil
+}
+
+func (o *OpenShell) Checkout(ctx context.Context, id string, opt workspace.CreateOptions) (workspace.Workspace, error) {
+	repoURL := strings.TrimSpace(opt.RepoURL)
+	if repoURL != "" {
+		if !strings.HasPrefix(repoURL, "https://") && !strings.HasPrefix(repoURL, "http://") {
+			return workspace.Workspace{}, &InvalidRequestError{Message: "repository URL must use http or https"}
+		}
+		cloneCtx, cancel := context.WithTimeout(ctx, workspace.CloneTimeout)
+		_, err := o.execRaw(cloneCtx, id, nil, "git", "clone", repoURL, ".")
+		cancel()
+		if err != nil {
+			return workspace.Workspace{}, fmt.Errorf("clone %s: %w", repoURL, err)
+		}
+	}
+	if err := o.store.AssignWorkspace(ctx, id, opt.Project, repoURL); err != nil {
+		return workspace.Workspace{}, err
+	}
+	return o.Get(ctx, id)
+}
+
 func (o *OpenShell) Get(ctx context.Context, id string) (workspace.Workspace, error) {
 	w, err := o.store.GetWorkspace(ctx, id)
 	if err != nil {
@@ -116,7 +162,7 @@ func (o *OpenShell) List(ctx context.Context) ([]workspace.Workspace, error) {
 	}
 	out := make([]workspace.Workspace, 0, len(rows))
 	for _, w := range rows {
-		if w.Provider == "openshell" {
+		if w.Provider == "openshell" && w.State != "preheated" {
 			out = append(out, publicWorkspace(w))
 		}
 	}

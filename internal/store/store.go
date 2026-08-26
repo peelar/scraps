@@ -147,6 +147,22 @@ func (s *Store) ListWorkspaces(ctx context.Context) ([]Workspace, error) {
 	return workspaces, rows.Err()
 }
 
+// AssignWorkspace atomically turns a preheated runtime into a user workspace.
+func (s *Store) AssignWorkspace(ctx context.Context, id, project, repoURL string) error {
+	result, err := s.db.ExecContext(ctx, `UPDATE workspaces SET project = ?, repo_url = ?, state = 'running', updated_at = ? WHERE id = ? AND state = 'preheated'`, project, repoURL, time.Now().UTC().Unix(), id)
+	if err != nil {
+		return fmt.Errorf("assign workspace: %w", err)
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if changed == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // UpdateWorkspaceState changes the persisted lifecycle state.
 func (s *Store) UpdateWorkspaceState(ctx context.Context, id, state string) error {
 	result, err := s.db.ExecContext(ctx, `UPDATE workspaces SET state = ?, updated_at = ? WHERE id = ?`, state, time.Now().UTC().Unix(), id)

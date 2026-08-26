@@ -22,10 +22,14 @@ func (s *Server) createWorkspace(response http.ResponseWriter, request *http.Req
 		return
 	}
 
-	created, err := s.provider.Create(request.Context(), workspace.CreateOptions{
-		Project: body.Project,
-		RepoURL: body.RepoURL,
-	})
+	options := workspace.CreateOptions{Project: body.Project, RepoURL: body.RepoURL}
+	var created workspace.Workspace
+	var err error
+	if s.pool != nil {
+		created, err = s.pool.create(request.Context(), options)
+	} else {
+		created, err = s.provider.Create(request.Context(), options)
+	}
 	if err != nil {
 		writeAPIError(response, workspaceCreationError(err))
 		return

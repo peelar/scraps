@@ -126,6 +126,52 @@ func (d *Docker) Create(ctx context.Context, o workspace.CreateOptions) (workspa
 	}
 	return workspace.Workspace{}, errors.New("could not generate a unique workspace id")
 }
+func (d *Docker) Ready(ctx context.Context) ([]workspace.Workspace, error) {
+	rows, err := d.store.ListWorkspaces(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var out []workspace.Workspace
+	for _, w := range rows {
+		if w.Provider == "docker" && w.State == "preheated" {
+			out = append(out, publicWorkspace(w))
+		}
+	}
+	return out, nil
+}
+
+func (d *Docker) Preheat(ctx context.Context) (workspace.Workspace, error) {
+	created, err := d.Create(ctx, workspace.CreateOptions{})
+	if err != nil {
+		return workspace.Workspace{}, err
+	}
+	if err := d.store.UpdateWorkspaceState(ctx, created.ID, "preheated"); err != nil {
+		_ = d.Delete(context.Background(), created.ID)
+		return workspace.Workspace{}, err
+	}
+	created.State = "preheated"
+	return created, nil
+}
+
+func (d *Docker) Checkout(ctx context.Context, id string, opt workspace.CreateOptions) (workspace.Workspace, error) {
+	repoURL := strings.TrimSpace(opt.RepoURL)
+	if repoURL != "" {
+		if !strings.HasPrefix(repoURL, "https://") && !strings.HasPrefix(repoURL, "http://") {
+			return workspace.Workspace{}, &InvalidRequestError{Message: "repository URL must use http or https"}
+		}
+		cloneCtx, cancel := context.WithTimeout(ctx, workspace.CloneTimeout)
+		_, err := d.run(cloneCtx, nil, "exec", dockerContainer(id), "git", "clone", repoURL, ".")
+		cancel()
+		if err != nil {
+			return workspace.Workspace{}, fmt.Errorf("clone %s: %w", repoURL, err)
+		}
+	}
+	if err := d.store.AssignWorkspace(ctx, id, opt.Project, repoURL); err != nil {
+		return workspace.Workspace{}, err
+	}
+	return d.Get(ctx, id)
+}
+
 func (d *Docker) Get(ctx context.Context, id string) (workspace.Workspace, error) {
 	w, err := d.store.GetWorkspace(ctx, id)
 	if err != nil {
@@ -143,7 +189,7 @@ func (d *Docker) List(ctx context.Context) ([]workspace.Workspace, error) {
 	}
 	out := make([]workspace.Workspace, 0, len(rows))
 	for _, w := range rows {
-		if w.Provider == "docker" {
+		if w.Provider == "docker" && w.State != "preheated" {
 			out = append(out, publicWorkspace(w))
 		}
 	}

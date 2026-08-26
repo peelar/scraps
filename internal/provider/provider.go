@@ -37,6 +37,14 @@ type Info struct {
 
 // Provider owns workspace lifecycle, execution, and filesystem operations.
 // HTTP handlers must not depend on a provider's host paths or runtime.
+// Preheater is implemented by providers that can reserve a clean running
+// runtime and later assign it without recreating the runtime.
+type Preheater interface {
+	Preheat(context.Context) (workspace.Workspace, error)
+	Checkout(context.Context, string, workspace.CreateOptions) (workspace.Workspace, error)
+	Ready(context.Context) ([]workspace.Workspace, error)
+}
+
 type Provider interface {
 	Info() Info
 	Create(context.Context, workspace.CreateOptions) (workspace.Workspace, error)

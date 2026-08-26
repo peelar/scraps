@@ -44,6 +44,7 @@ type Server struct {
 	dataDir  string
 	started  time.Time
 	shutdown func()
+	pool     *readyPool
 }
 
 // New opens the store under the data dir and builds the HTTP handler.
@@ -86,12 +87,16 @@ func New(config Config) (*Server, error) {
 		started:  time.Now(),
 		shutdown: shutdown,
 	}
+	server.pool = newReadyPool(runtime)
 	server.handler = server.routes()
 	return server, nil
 }
 
 // Close releases server resources.
-func (s *Server) Close() { s.shutdown() }
+func (s *Server) Close() {
+	s.pool.close()
+	s.shutdown()
+}
 
 // Handler returns the root HTTP handler.
 func (s *Server) Handler() http.Handler { return s.handler }
