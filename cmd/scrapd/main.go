@@ -41,10 +41,14 @@ func run() error {
 		return fmt.Errorf("create data dir: %w", err)
 	}
 
+	providerName := os.Getenv("SCRAPD_PROVIDER")
+	if providerName == "" {
+		providerName = "docker"
+	}
 	apiServer, err := server.New(server.Config{
 		DataDir:      dataDir,
 		Token:        os.Getenv("SCRAPD_TOKEN"),
-		ProviderName: os.Getenv("SCRAPD_PROVIDER"),
+		ProviderName: providerName,
 		DockerImage:  os.Getenv("SCRAPD_DOCKER_IMAGE"),
 	})
 	if err != nil {

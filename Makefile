@@ -1,9 +1,9 @@
 INSTALL_DIR ?= $(HOME)/.local/bin
 
-.PHONY: build build-go check clean dev-daemon docker-image docker-up down install sync-extension test uninstall up
+.PHONY: build build-go check clean dev-daemon docker-image down install sync-extension test uninstall up
 
 # One-command local setup: build, install stable PATH entries, ensure daemon.
-up: install
+up: docker-image install
 	$(INSTALL_DIR)/scrap up
 
 install: build
@@ -42,11 +42,6 @@ dev-daemon:
 
 docker-image:
 	docker build --pull -t scraps-dev:bookworm docker
-
-# Build everything, switch from any running provider, and start Docker mode.
-docker-up: docker-image install
-	-$(INSTALL_DIR)/scrap down
-	SCRAPD_PROVIDER=docker $(INSTALL_DIR)/scrap up
 
 test:
 	go test ./...

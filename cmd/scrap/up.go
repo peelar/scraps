@@ -44,9 +44,15 @@ func runUp(args []string) int {
 		return 0
 	}
 
+	desiredProvider := os.Getenv("SCRAPD_PROVIDER")
+	if desiredProvider == "" {
+		desiredProvider = "docker"
+	}
+	current := manager.Probe(ctx)
+	providerChanged := current.State == daemon.StateRunning && current.Info != nil && current.Info.Provider != desiredProvider
 	action, status, err := manager.EnsureRunning(ctx, daemon.EnsureOptions{
 		RestartStale: true,
-		ForceRestart: *restart,
+		ForceRestart: *restart || providerChanged,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "scrap: %v\n", err)

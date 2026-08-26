@@ -12,7 +12,7 @@ local Pi + your personality  ─── remote tools ───▶  disposable dev
 
 ## Try it
 
-Requirements: Go 1.24+, Node.js 22+, and pnpm 10+.
+Requirements: Docker, Go 1.24+, Node.js 22+, and pnpm 10+.
 
 ```bash
 pnpm install
@@ -37,17 +37,12 @@ scrap status             # check the daemon
 scrap down               # lights out
 ```
 
-## Docker workspaces
+Docker workspaces are the default: `make up` builds the pinned image and starts
+everything. Override it with `SCRAPD_DOCKER_IMAGE`. Docker Engine, Docker
+Desktop, and OrbStack are supported through the Docker CLI.
 
-Directory workspaces remain the trusted-development default. For an isolated
-Linux workspace, build the pinned image and switch providers in one command:
-
-```bash
-make docker-up
-```
-
-Override the image with `SCRAPD_DOCKER_IMAGE`. Docker Engine, Docker Desktop,
-and OrbStack are supported through the Docker CLI.
+For trusted provider development without isolation, explicitly use
+`SCRAPD_PROVIDER=directory make up`.
 
 ## Where it is today
 
