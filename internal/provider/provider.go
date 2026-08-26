@@ -17,10 +17,20 @@ const (
 	IsolationVM        Isolation = "vm"
 )
 
-// Info identifies a provider and its effective isolation level.
+// Policy reports the effective sandbox controls, including limitations.
+type Policy struct {
+	Environment    string `json:"environment"`
+	Network        string `json:"network"`
+	Resources      string `json:"resources"`
+	Credentials    string `json:"credentials"`
+	ProcessCleanup string `json:"processCleanup"`
+}
+
+// Info identifies a provider, its effective isolation, and enforced policy.
 type Info struct {
 	Name      string
 	Isolation Isolation
+	Policy    Policy
 }
 
 // Provider owns workspace lifecycle, execution, and filesystem operations.
@@ -46,7 +56,9 @@ type Provider interface {
 type ExecRequest struct {
 	Command string
 	CWD     string
-	Env     map[string]string
+	// Env contains explicit per-command values. Providers must not augment it
+	// by inheriting the daemon's complete environment.
+	Env map[string]string
 }
 
 type ExecEvent struct {

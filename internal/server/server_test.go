@@ -140,6 +140,9 @@ func TestInfo(t *testing.T) {
 	if body.Provider != "directory" || body.Isolation != "none" {
 		t.Fatalf("provider = %q isolation = %q, want directory/none", body.Provider, body.Isolation)
 	}
+	if body.Policy.Environment != "minimal" || body.Policy.Network != "host-unrestricted" || body.Policy.Resources != "host-unlimited" {
+		t.Fatalf("policy = %+v", body.Policy)
+	}
 }
 
 func TestAuth(t *testing.T) {
@@ -265,15 +268,17 @@ func TestExecStreamsOutputAndExitCode(t *testing.T) {
 }
 
 func TestExecUsesVirtualWorkspaceRoot(t *testing.T) {
+	t.Setenv("SCRAPS_TEST_HOST_SECRET", "must-not-leak")
 	ts := newTestServer(t)
 	created := ts.createWorkspace(t, workspace.CreateOptions{})
 
 	events := runExec(t, ts, created.ID, map[string]any{
-		"command": "pwd; test -d /workspace; echo /workspace/file.txt",
+		"command": "pwd; test -d /workspace; echo /workspace/file.txt; printf 'secret=%s\\n' \"${SCRAPS_TEST_HOST_SECRET-unset}\"; printf 'explicit=%s\\n' \"$EXPLICIT_SAFE\"; printf 'home=%s\\n' \"$HOME\"; printf 'root=%s\\n' \"$SCRAP_WORKSPACE_ROOT\"",
 		"cwd":     ".",
+		"env":     map[string]string{"EXPLICIT_SAFE": "present"},
 	})
 	output := execOutput(events)
-	if output != "/workspace\n/workspace/file.txt\n" {
+	if output != "/workspace\n/workspace/file.txt\nsecret=unset\nexplicit=present\nhome=/workspace\nroot=/workspace\n" {
 		t.Fatalf("virtualized output = %q", output)
 	}
 	if strings.Contains(output, ts.dataDir) {

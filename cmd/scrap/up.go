@@ -144,6 +144,10 @@ func printStatus(manager *daemon.Manager, status daemon.Status) {
 		fmt.Printf("  version %s (%s) · up %s · provider %s (%s) · data %s\n",
 			status.Info.Version, status.Info.Commit, uptime(status.Info.StartedAt),
 			status.Info.Provider, status.Info.Isolation, status.Info.DataDir)
+		policy := status.Info.Policy
+		fmt.Printf("  policy env=%s · network=%s · resources=%s · credentials=%s · cleanup=%s\n",
+			policy.Environment, policy.Network, policy.Resources,
+			policy.Credentials, policy.ProcessCleanup)
 	}
 	if status.StaleBinary {
 		fmt.Println("  ⚠ binary is newer than the running daemon — `scrap up` will restart it")

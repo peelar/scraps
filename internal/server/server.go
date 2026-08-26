@@ -123,19 +123,21 @@ func info(server *Server) http.HandlerFunc {
 			PID:       os.Getpid(),
 			Provider:  providerInfo.Name,
 			Isolation: string(providerInfo.Isolation),
+			Policy:    providerInfo.Policy,
 		})
 	}
 }
 
 type infoResponse struct {
-	Name      string `json:"name"`
-	Version   string `json:"version"`
-	Commit    string `json:"commit"`
-	DataDir   string `json:"dataDir"`
-	StartedAt string `json:"startedAt"`
-	PID       int    `json:"pid"`
-	Provider  string `json:"provider"`
-	Isolation string `json:"isolation"`
+	Name      string          `json:"name"`
+	Version   string          `json:"version"`
+	Commit    string          `json:"commit"`
+	DataDir   string          `json:"dataDir"`
+	StartedAt string          `json:"startedAt"`
+	PID       int             `json:"pid"`
+	Provider  string          `json:"provider"`
+	Isolation string          `json:"isolation"`
+	Policy    provider.Policy `json:"policy"`
 }
 
 // requireAuth enforces the bearer token when one is configured.

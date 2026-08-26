@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/peelar/scraps/internal/provider"
 	"github.com/peelar/scraps/internal/workspace"
 )
 
@@ -101,14 +102,15 @@ func (c *Client) Ping(ctx context.Context) error {
 
 // InfoResponse is the daemon identity payload from /v1/info.
 type InfoResponse struct {
-	Name      string `json:"name"`
-	Version   string `json:"version"`
-	Commit    string `json:"commit"`
-	DataDir   string `json:"dataDir"`
-	StartedAt string `json:"startedAt"`
-	PID       int    `json:"pid"`
-	Provider  string `json:"provider"`
-	Isolation string `json:"isolation"`
+	Name      string          `json:"name"`
+	Version   string          `json:"version"`
+	Commit    string          `json:"commit"`
+	DataDir   string          `json:"dataDir"`
+	StartedAt string          `json:"startedAt"`
+	PID       int             `json:"pid"`
+	Provider  string          `json:"provider"`
+	Isolation string          `json:"isolation"`
+	Policy    provider.Policy `json:"policy"`
 }
 
 // Info fetches daemon identity.

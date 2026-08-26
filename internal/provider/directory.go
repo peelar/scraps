@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"os"
@@ -28,7 +29,19 @@ func NewDirectory(st *store.Store, dataDir string) (*Directory, error) {
 	}
 	return &Directory{manager: manager}, nil
 }
-func (*Directory) Info() Info { return Info{Name: "directory", Isolation: IsolationNone} }
+func (*Directory) Info() Info {
+	return Info{
+		Name:      "directory",
+		Isolation: IsolationNone,
+		Policy: Policy{
+			Environment:    "minimal",
+			Network:        "host-unrestricted",
+			Resources:      "host-unlimited",
+			Credentials:    "none",
+			ProcessCleanup: "process-group",
+		},
+	}
+}
 func (d *Directory) Create(c context.Context, o workspace.CreateOptions) (workspace.Workspace, error) {
 	return d.manager.Create(c, o)
 }
@@ -62,9 +75,13 @@ func (d *Directory) Exec(ctx context.Context, id string, r ExecRequest, emit fun
 	// Sandboxed providers mount /workspace directly. The trusted directory
 	// provider emulates it and redacts its private host root from output.
 	command := strings.ReplaceAll(r.Command, workspace.VirtualRoot, hostRoot)
+	commandEnv, err := directoryEnvironment(hostRoot, r.Env)
+	if err != nil {
+		return err
+	}
 	cmd := exec.CommandContext(ctx, "/bin/bash", "-c", command)
 	cmd.Dir = cwd
-	cmd.Env = append(os.Environ(), envSlice(r.Env)...)
+	cmd.Env = commandEnv
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error {
 		if cmd.Process != nil {
@@ -124,12 +141,33 @@ func copyOutput(wg *sync.WaitGroup, r io.Reader, stream, hostRoot string, emit f
 		}
 	}
 }
-func envSlice(env map[string]string) []string {
-	out := make([]string, 0, len(env))
-	for k, v := range env {
-		out = append(out, k+"="+v)
+func directoryEnvironment(hostRoot string, requested map[string]string) ([]string, error) {
+	tmp := filepath.Join(hostRoot, ".scrap", "tmp")
+	if err := os.MkdirAll(tmp, 0o700); err != nil {
+		return nil, fmt.Errorf("create workspace temp directory: %w", err)
 	}
-	return out
+	env := map[string]string{
+		"HOME":   hostRoot,
+		"PATH":   os.Getenv("PATH"),
+		"SHELL":  "/bin/bash",
+		"TMPDIR": tmp,
+		// Directory mode emulates /workspace; output redaction preserves the
+		// public value while host processes need the real path to use it.
+		"SCRAP_WORKSPACE_ROOT": hostRoot,
+	}
+	for _, key := range []string{"LANG", "LC_ALL", "TERM"} {
+		if value := os.Getenv(key); value != "" {
+			env[key] = value
+		}
+	}
+	for key, value := range requested {
+		env[key] = value
+	}
+	out := make([]string, 0, len(env))
+	for key, value := range env {
+		out = append(out, key+"="+value)
+	}
+	return out, nil
 }
 
 // InvalidRequestError reports a provider operation invalid for the requested path/state.
