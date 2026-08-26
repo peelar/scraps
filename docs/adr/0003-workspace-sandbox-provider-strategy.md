@@ -3,6 +3,11 @@
 - Status: Accepted
 - Date: 2026-08-24
 
+> ADR 0008 supersedes the default-provider and production topology portions of
+> this decision: OpenShell is now the default control plane, with a shared
+> container pool inside one protective Proxmox VM. The provider boundary,
+> directory-mode warning, and direct-Docker baseline remain applicable.
+
 ## Context
 
 The M1 implementation deliberately uses a directory-backed provider. Each

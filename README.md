@@ -12,7 +12,8 @@ local Pi + your personality  ─── remote tools ───▶  disposable dev
 
 ## Try it
 
-Requirements: Docker, Go 1.24+, Node.js 22+, and pnpm 10+.
+Requirements: Docker, Go 1.24+, Node.js 22+, pnpm 10+, and `curl`.
+`make up` installs and starts the pinned OpenShell release when needed.
 
 ```bash
 pnpm install
@@ -37,37 +38,23 @@ scrap status             # check the daemon
 scrap down               # lights out
 ```
 
-Docker workspaces are the default: `make up` builds the pinned image and starts
-everything. Override it with `SCRAPD_DOCKER_IMAGE`. Docker Engine, Docker
-Desktop, and OrbStack are supported through the Docker CLI.
+OpenShell workspaces are the default. `make up` installs the pinned OpenShell
+release, boots its local gateway, builds the Scraps workspace image, and starts
+`scrapd`. OpenShell owns sandbox lifecycle, network policy, credential providers,
+and resource controls while Scraps preserves the Pi tools and `/workspace`
+contract. Override the image with `SCRAPD_OPENSHELL_IMAGE`.
 
-For trusted provider development without isolation, explicitly use
-`SCRAPD_PROVIDER=directory make up`.
-
-### Experimental OpenShell provider
-
-Scraps can delegate sandbox lifecycle, network policy, credentials, and resource
-controls to a self-hosted [NVIDIA OpenShell](https://github.com/NVIDIA/OpenShell)
-gateway while preserving the Pi tools and `/workspace` contract. Install the
-`openshell` CLI, configure an active gateway, then run:
-
-```bash
-SCRAPD_PROVIDER=openshell make up
-scrap pi
-```
-
-The default image is `scraps-dev:bookworm`; override it with
-`SCRAPD_OPENSHELL_IMAGE`. `scrap status` makes the OpenShell policy and
-credential boundary visible. This provider remains experimental until its
-integration suite passes against the intended single-VM deployment.
+The direct Docker backend remains available with `SCRAPD_PROVIDER=docker make
+up`; override its image with `SCRAPD_DOCKER_IMAGE`. For trusted provider
+development without isolation, use `SCRAPD_PROVIDER=directory make up`.
 
 ## Where it is today
 
 Scraps is an early prototype. Directory mode uses **literal directories and
-host processes—it is not a security sandbox**. Docker mode adds an unprivileged
-container and private volume with CPU, memory, and PID limits, but is not the
-final hostile multi-tenant boundary. Proxmox VMs are the production
-destination.
+host processes—it is not a security sandbox**. OpenShell is now the default
+sandbox control plane, backed locally by its detected container runtime. The
+intended deployment places the whole OpenShell/container pool inside one
+protective Proxmox VM.
 
 Pi already runs locally with seven fail-closed, workspace-backed tools:
 `bash`, `read`, `write`, `edit`, `ls`, `find`, and `grep`.

@@ -43,7 +43,7 @@ func run() error {
 
 	providerName := os.Getenv("SCRAPD_PROVIDER")
 	if providerName == "" {
-		providerName = "docker"
+		providerName = "openshell"
 	}
 	apiServer, err := server.New(server.Config{
 		DataDir:        dataDir,

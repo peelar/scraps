@@ -46,7 +46,7 @@ func runUp(args []string) int {
 
 	desiredProvider := os.Getenv("SCRAPD_PROVIDER")
 	if desiredProvider == "" {
-		desiredProvider = "docker"
+		desiredProvider = "openshell"
 	}
 	current := manager.Probe(ctx)
 	providerChanged := current.State == daemon.StateRunning && current.Info != nil && current.Info.Provider != desiredProvider

@@ -1,17 +1,17 @@
-FROM debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171
+# OpenShell's maintained agent image supplies the users, supervisor-compatible
+# layout, network tooling, common development tools, and supported agent CLIs.
+# Pin by digest so `make up` is reproducible even when the community tag moves.
+FROM ghcr.io/nvidia/openshell-community/sandboxes/base@sha256:aeef1c63f00e2913ea002ccb3aaf925f338b5c5d70e63576f0d95c16a138044e
 
+USER root
 RUN apt-get update \
-    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-       bash ca-certificates coreutils findutils git procps python3 ripgrep \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ripgrep \
     && rm -rf /var/lib/apt/lists/* \
-    && useradd --uid 1000 --create-home --shell /bin/bash scrap
+    && mkdir -p /workspace \
+    && chmod 1777 /workspace
 
-USER 1000:1000
-WORKDIR /workspace
 ENV HOME=/workspace \
-    PATH=/usr/local/bin:/usr/bin:/bin \
-    SHELL=/bin/bash \
     TMPDIR=/workspace/.scrap/tmp \
     SCRAP_WORKSPACE_ROOT=/workspace
-
-CMD ["sleep", "infinity"]
+WORKDIR /workspace
+USER sandbox

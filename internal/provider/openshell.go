@@ -66,6 +66,9 @@ func (o *OpenShell) Create(ctx context.Context, opt workspace.CreateOptions) (wo
 		}
 		args := []string{"sandbox", "create", "--name", id, "--from", o.image, "--cpu", "2", "--memory", "4Gi", "--label", "dev.scraps.workspace=" + id, "--no-auto-providers", "--detach", "--", "sleep", "infinity"}
 		if _, err = o.run(ctx, nil, args...); err != nil {
+			// OpenShell may persist a sandbox in Error phase even though create
+			// returns non-zero. Reclaim it before surfacing the failure.
+			_, _ = o.run(context.Background(), nil, "sandbox", "delete", id)
 			return workspace.Workspace{}, err
 		}
 		cleanup := func() { _, _ = o.run(context.Background(), nil, "sandbox", "delete", id) }
