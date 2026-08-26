@@ -44,6 +44,23 @@ Desktop, and OrbStack are supported through the Docker CLI.
 For trusted provider development without isolation, explicitly use
 `SCRAPD_PROVIDER=directory make up`.
 
+### Experimental OpenShell provider
+
+Scraps can delegate sandbox lifecycle, network policy, credentials, and resource
+controls to a self-hosted [NVIDIA OpenShell](https://github.com/NVIDIA/OpenShell)
+gateway while preserving the Pi tools and `/workspace` contract. Install the
+`openshell` CLI, configure an active gateway, then run:
+
+```bash
+SCRAPD_PROVIDER=openshell make up
+scrap pi
+```
+
+The default image is `scraps-dev:bookworm`; override it with
+`SCRAPD_OPENSHELL_IMAGE`. `scrap status` makes the OpenShell policy and
+credential boundary visible. This provider remains experimental until its
+integration suite passes against the intended single-VM deployment.
+
 ## Where it is today
 
 Scraps is an early prototype. Directory mode uses **literal directories and

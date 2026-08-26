@@ -28,10 +28,12 @@ type Config struct {
 	Token string
 	// Provider overrides provider construction, primarily for tests.
 	Provider provider.Provider
-	// ProviderName selects "directory" (default) or "docker".
+	// ProviderName selects "directory", "docker", or "openshell".
 	ProviderName string
 	// DockerImage overrides the Docker provider image.
 	DockerImage string
+	// OpenShellImage overrides the image used for OpenShell sandboxes.
+	OpenShellImage string
 }
 
 // Server wires a workspace provider and HTTP routes.
@@ -65,6 +67,8 @@ func New(config Config) (*Server, error) {
 			runtime, err = provider.NewDirectory(st, config.DataDir)
 		case "docker":
 			runtime, err = provider.NewDocker(context.Background(), st, config.DockerImage)
+		case "openshell":
+			runtime, err = provider.NewOpenShell(context.Background(), st, config.OpenShellImage)
 		default:
 			err = fmt.Errorf("server: unknown provider %q", config.ProviderName)
 		}
