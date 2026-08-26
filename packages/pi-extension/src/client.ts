@@ -28,7 +28,7 @@ export type WorkspaceRecord = {
 	readonly id: string;
 	readonly project?: string;
 	readonly repoUrl?: string;
-	/** Lifecycle state; the directory provider always reports "running". */
+	/** OpenShell sandbox lifecycle state. */
 	readonly state: string;
 	/** Stable agent-visible root; currently always `/workspace`. */
 	readonly rootPath?: string;

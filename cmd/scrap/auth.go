@@ -65,7 +65,7 @@ func runAuth(args []string) int {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	if workerVMMarkerExists() {
+	if os.Getenv("SCRAPS_WORKER_VM") != "1" {
 		if err := configureGitHubProviderInWorker(ctx, token); err != nil {
 			return authError(err)
 		}
@@ -132,7 +132,7 @@ func configureGitHubProviderInWorker(ctx context.Context, token []byte) error {
 	if vmName == "" {
 		vmName = "scraps"
 	}
-	cmd := exec.CommandContext(ctx, "limactl", "shell", vmName, "scrap", "auth", "github", "--token-stdin")
+	cmd := exec.CommandContext(ctx, "limactl", "shell", vmName, "env", "SCRAPS_WORKER_VM=1", "scrap", "auth", "github", "--token-stdin")
 	cmd.Stdin = strings.NewReader(string(token) + "\n")
 	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
 	if err := cmd.Run(); err != nil {

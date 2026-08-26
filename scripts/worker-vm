@@ -3,11 +3,37 @@ set -euo pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 VM_NAME=${SCRAPS_VM_NAME:-scraps}
+CONFIG_FILE=${XDG_CONFIG_HOME:-$HOME/.config}/scraps/worker.conf
+VM_CPUS=4
+VM_MEMORY_GIB=8
+VM_DISK_GIB=60
+
+load_config() {
+  [[ -f "$CONFIG_FILE" ]] || return 0
+  while IFS='=' read -r key value; do
+    key=${key//[[:space:]]/}
+    value=${value//[[:space:]]/}
+    [[ -z "$key" || "$key" == \#* ]] && continue
+    case "$key" in
+      cpus) VM_CPUS=$value ;;
+      memory_gib) VM_MEMORY_GIB=$value ;;
+      disk_gib) VM_DISK_GIB=$value ;;
+      *) echo "scraps: unknown worker setting '$key' in $CONFIG_FILE" >&2; exit 1 ;;
+    esac
+  done <"$CONFIG_FILE"
+  [[ "$VM_CPUS" =~ ^[0-9]+$ && "$VM_CPUS" -ge 1 ]] || { echo "scraps: invalid CPU count in $CONFIG_FILE" >&2; exit 1; }
+  [[ "$VM_MEMORY_GIB" =~ ^[0-9]+$ && "$VM_MEMORY_GIB" -ge 2 ]] || { echo "scraps: invalid memory size in $CONFIG_FILE" >&2; exit 1; }
+  [[ "$VM_DISK_GIB" =~ ^[0-9]+$ && "$VM_DISK_GIB" -ge 10 ]] || { echo "scraps: invalid disk size in $CONFIG_FILE" >&2; exit 1; }
+}
+
+load_config
+
 usage() {
   cat <<EOF
 usage: scripts/worker-vm <up|stop|delete|status|shell>
 
-Manage the local Lima worker VM. Set SCRAPS_VM_NAME to use a different instance.
+Manage the local Lima worker VM. Run 'scrap configure' to set its size before
+creation. Set SCRAPS_VM_NAME to use a different instance.
 EOF
 }
 
@@ -29,7 +55,10 @@ start_vm() {
   case "$status" in
     Running) ;;
     Stopped) limactl start "$VM_NAME" ;;
-    *) limactl start --name "$VM_NAME" "$ROOT/vm/lima.yaml" ;;
+    *)
+      echo "Creating worker VM: $VM_CPUS CPUs, $VM_MEMORY_GIB GiB memory, $VM_DISK_GIB GiB disk"
+      limactl start --tty=false --name "$VM_NAME" --cpus "$VM_CPUS" --memory "$VM_MEMORY_GIB" --disk "$VM_DISK_GIB" "$ROOT/vm/lima.yaml"
+      ;;
   esac
 }
 
@@ -50,7 +79,7 @@ build_bundle() {
 
 copy_bundle() {
   local stage=$1
-  tar -C "$stage" -czf - . | limactl shell "$VM_NAME" bash -c \
+  COPYFILE_DISABLE=1 tar --no-xattrs -C "$stage" -czf - . | limactl shell "$VM_NAME" bash -c \
     'rm -rf "$HOME/.cache/scraps/deploy.new"; mkdir -p "$HOME/.cache/scraps/deploy.new"; tar -xzf - -C "$HOME/.cache/scraps/deploy.new"; rm -rf "$HOME/.cache/scraps/deploy"; mv "$HOME/.cache/scraps/deploy.new" "$HOME/.cache/scraps/deploy"'
 }
 
@@ -64,32 +93,78 @@ export PATH="$HOME/.local/bin:$PATH"
 cat >"$HOME/.config/openshell/gateway.toml" <<EOF
 [openshell.gateway]
 compute_drivers = ["docker"]
+# Containers reach the gateway through the VM-side Docker bridge. Lima
+# publishes only scrapd:8484; its catch-all deny keeps this port off the host.
+bind_address = "0.0.0.0:17670"
 
 [openshell.drivers.docker]
-socket_path = "/run/user/$(id -u)/docker.sock"
+socket_path = "/var/run/docker.sock"
 EOF
-# A previous failed install may have left the gateway restart-looping before
-# this explicit rootless socket configuration existed.
-systemctl --user restart openshell-gateway.service 2>/dev/null || true
-scrap setup
-scrap up --restart
+# Remove the compatibility override used by early rootless-VM prototypes.
+rm -f "$HOME/.config/systemd/user/openshell-gateway.service.d/rootless-docker.conf"
+systemctl --user daemon-reload
+# Lima's readiness probe runs only when the VM is first created. On resume,
+# Docker can still be starting while deployment begins.
+systemctl --user stop openshell-gateway.service 2>/dev/null || true
+if ! timeout 120 bash -c 'until docker info >/dev/null 2>&1; do sleep 2; done'; then
+  echo "scraps: Docker did not become ready" >&2
+  exit 1
+fi
+systemctl --user restart openshell-gateway.service
+# systemctl reports success before OpenShell has connected to Docker and bound
+# its API socket (and the first start may need to pull the supervisor image).
+if ! timeout 180 bash -c 'until openshell status >/dev/null 2>&1; do sleep 2; done'; then
+  echo "scraps: OpenShell gateway did not become ready" >&2
+  journalctl --user -u openshell-gateway.service -n 80 --no-pager >&2 || true
+  exit 1
+fi
+scrap _worker-setup
+mkdir -p "$HOME/.config/systemd/user"
+cat >"$HOME/.config/systemd/user/scrapd.service" <<'EOF'
+[Unit]
+Description=Scraps workspace daemon
+After=openshell-gateway.service
+Requires=openshell-gateway.service
+
+[Service]
+Type=simple
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=%h/.local/bin/scrapd
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target
+EOF
+systemctl --user daemon-reload
+systemctl --user enable scrapd.service >/dev/null
+# Migrate daemons started by older Scraps releases into the systemd service.
+systemctl --user stop scrapd.service 2>/dev/null || true
+pkill -x scrapd 2>/dev/null || true
+timeout 10 bash -c 'while pgrep -x scrapd >/dev/null; do sleep 1; done'
+systemctl --user start scrapd.service
+if ! timeout 30 bash -c 'until systemctl --user is-active --quiet scrapd.service && curl -fs http://127.0.0.1:8484/healthz >/dev/null 2>&1; do sleep 1; done'; then
+  echo "scraps: scrapd did not become ready" >&2
+  journalctl --user -u scrapd.service -n 80 --no-pager >&2 || true
+  exit 1
+fi
 GUEST
 }
 
 up() {
   require_lima
   start_vm
-  local stage arch
-  stage=$(mktemp -d)
-  trap 'rm -rf "$stage"' EXIT
+  local arch
+  STAGE=$(mktemp -d)
+  trap 'rm -rf -- "${STAGE:-}"' EXIT
   arch=$(guest_arch)
   echo "building Scraps worker bundle for linux/$arch..."
-  build_bundle "$stage" "$arch"
-  copy_bundle "$stage"
+  build_bundle "$STAGE" "$arch"
+  copy_bundle "$STAGE"
   deploy_guest
-  mkdir -p "$HOME/.scrap"
-  touch "$HOME/.scrap/worker-vm"
   echo "Scraps worker VM ready -> http://127.0.0.1:8484"
+  rm -rf -- "$STAGE"
+  trap - EXIT
 }
 
 case "${1:-}" in

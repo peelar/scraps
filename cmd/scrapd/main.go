@@ -13,7 +13,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/peelar/scraps/internal/daemon"
 	"github.com/peelar/scraps/internal/server"
 )
 
@@ -41,15 +40,9 @@ func run() error {
 		return fmt.Errorf("create data dir: %w", err)
 	}
 
-	providerName := os.Getenv("SCRAPD_PROVIDER")
-	if providerName == "" {
-		providerName = "openshell"
-	}
 	apiServer, err := server.New(server.Config{
 		DataDir:        dataDir,
 		Token:          os.Getenv("SCRAPD_TOKEN"),
-		ProviderName:   providerName,
-		DockerImage:    os.Getenv("SCRAPD_DOCKER_IMAGE"),
 		OpenShellImage: os.Getenv("SCRAPD_OPENSHELL_IMAGE"),
 	})
 	if err != nil {
@@ -66,22 +59,6 @@ func run() error {
 	listener, err := net.Listen("tcp", address)
 	if err != nil {
 		return fmt.Errorf("listen %s: %w", address, err)
-	}
-
-	pidFile := os.Getenv("SCRAPD_PID_FILE")
-	if pidFile == "" {
-		_, port, _ := net.SplitHostPort(address)
-		userHome, err := os.UserHomeDir()
-		if err == nil {
-			pidFile = filepath.Join(userHome, ".scrap", fmt.Sprintf("scrapd-%s.pid", port))
-		}
-	}
-	if pidFile != "" {
-		if err := daemon.WritePIDFile(pidFile); err != nil {
-			slog.Warn("write pid file", "path", pidFile, "error", err)
-		} else {
-			defer daemon.RemovePIDFile(pidFile)
-		}
 	}
 
 	stop := make(chan os.Signal, 1)

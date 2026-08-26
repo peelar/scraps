@@ -485,4 +485,4 @@ func openShellBoolArg(v bool) string {
 	return "0"
 }
 
-var _ Provider = (*Docker)(nil)
+var _ Provider = (*OpenShell)(nil)

@@ -12,7 +12,6 @@ import (
 type Isolation string
 
 const (
-	IsolationNone      Isolation = "none"
 	IsolationContainer Isolation = "container"
 	IsolationVM        Isolation = "vm"
 )

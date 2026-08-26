@@ -160,34 +160,4 @@ export function registerScrapCommands(
 		},
 	});
 
-	// M1 has no start/stop lifecycle (directory provider workspaces are
-	// always running) and no preview registry yet; the commands exist so the
-	// interface is stable and clearly state what is coming.
-
-	pi.registerCommand("scrap-preview", {
-		description: "List service previews exposed by the workspace",
-		handler: async (_args, ctx) => {
-			if (!requireRemote(ctx.ui)) {
-				return;
-			}
-			ctx.ui.notify(
-				"Service previews are not implemented yet (arrive with M7 `scrap open`).",
-				"warning",
-			);
-		},
-	});
-
-	pi.registerCommand("scrap-sync", {
-		description: "Synchronize workspace changes to the local checkout",
-		handler: async (_args, ctx) => {
-			if (!requireRemote(ctx.ui)) {
-				return;
-			}
-			ctx.ui.notify(
-				"Explicit synchronization is not implemented yet (ADR 0001 follow-up). " +
-					"Commit inside the workspace with git and push instead.",
-				"warning",
-			);
-		},
-	});
 }

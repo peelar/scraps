@@ -21,30 +21,29 @@ containerd:
   system: false
   user: false
 
-# Install rootless Docker without exposing either the host socket to the guest
-# or the guest socket to the host.
+# Docker is rootful inside the protective worker VM. The socket is never
+# forwarded or mounted into workspaces; the VM is the outer trust boundary.
 provision:
   - mode: system
     script: |
       #!/bin/bash
       set -eux -o pipefail
-      command -v docker >/dev/null 2>&1 && exit 0
-      export DEBIAN_FRONTEND=noninteractive
-      curl -fsSL https://get.docker.com | sh
-      systemctl disable --now docker.service docker.socket containerd.service containerd.socket || true
-      systemctl mask docker.service docker.socket containerd.service containerd.socket || true
-      apt-get install -y uidmap dbus-user-session
-  - mode: user
-    script: |
-      #!/bin/bash
-      set -eux -o pipefail
-      systemctl --user start dbus
-      dockerd-rootless-setuptool.sh install
-      docker context use rootless
+      if ! command -v docker >/dev/null 2>&1; then
+        export DEBIAN_FRONTEND=noninteractive
+        curl -fsSL https://get.docker.com | sh
+      fi
+      usermod -aG docker "{{.User}}"
+      mkdir -p /etc/systemd/system/docker.socket.d
+      cat >/etc/systemd/system/docker.socket.d/scraps.conf <<'EOF'
+      [Socket]
+      SocketMode=0666
+      EOF
+      systemctl daemon-reload
+      systemctl enable --now docker.socket docker.service
 
 probes:
   - mode: readiness
-    description: rootless Docker to be ready
+    description: Docker to be ready
     script: |
       #!/bin/bash
       set -eux -o pipefail
@@ -62,6 +61,11 @@ portForwards:
     guestPort: 8484
     hostIP: 127.0.0.1
     hostPort: 8484
+  # Override Lima's fallback that otherwise forwards every guest-loopback
+  # listener (including the OpenShell gateway) onto the developer host.
+  - guestIP: 127.0.0.1
+    guestPortRange: [1, 65535]
+    ignore: true
 
 message: |
   Scraps worker VM is ready. Use `make vm-shell` for diagnostics.

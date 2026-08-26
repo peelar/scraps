@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"github.com/peelar/scraps/internal/provider"
+	"github.com/peelar/scraps/internal/store"
+	"github.com/peelar/scraps/internal/testprovider"
 	"github.com/peelar/scraps/internal/workspace"
 )
 
@@ -41,11 +43,21 @@ func newTestServer(t *testing.T) *testServer {
 func newTestServerWithToken(t *testing.T, token string) *testServer {
 	t.Helper()
 	dataDir := t.TempDir()
-	server, err := New(Config{DataDir: dataDir, Token: token})
+	st, err := store.Open(filepath.Join(dataDir, "scrapd.db"))
 	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	runtime, err := testprovider.NewDirectory(st, dataDir)
+	if err != nil {
+		st.Close()
+		t.Fatalf("new test provider: %v", err)
+	}
+	server, err := New(Config{DataDir: dataDir, Token: token, Provider: runtime})
+	if err != nil {
+		st.Close()
 		t.Fatalf("new server: %v", err)
 	}
-	t.Cleanup(server.Close)
+	t.Cleanup(func() { server.Close(); st.Close() })
 	return &testServer{Server: server, handler: server.Handler(), dataDir: dataDir}
 }
 
@@ -120,13 +132,6 @@ func TestHealth(t *testing.T) {
 	response := ts.do(t, http.MethodGet, "/healthz", nil, "")
 	if response.Code != http.StatusOK || response.Body.String() != "ok\n" {
 		t.Fatalf("health = %d %q", response.Code, response.Body.String())
-	}
-}
-
-func TestRejectsUnknownProvider(t *testing.T) {
-	_, err := New(Config{DataDir: t.TempDir(), ProviderName: "mystery"})
-	if err == nil || !strings.Contains(err.Error(), `unknown provider "mystery"`) {
-		t.Fatalf("error = %v", err)
 	}
 }
 

@@ -39,15 +39,14 @@ hosts.
 ### Initial local driver
 
 Lima 2.0+ is the first implemented worker-VM driver for macOS and Linux. The
-checked-in template creates a headless Ubuntu VM with rootless Docker, 4 CPUs,
+checked-in template creates a headless Ubuntu VM with Docker Engine, 4 CPUs,
 8 GiB memory, and 60 GiB disk. It forwards guest-loopback port 8484 to host
 loopback so local Pi retains the stable daemon URL.
 
 The VM receives a purpose-built deployment bundle. It does not mount the host
 home, checkout, SSH agent, or Docker socket. `make up`, `make down`, `make
-vm-shell`, and `make vm-delete` own its lifecycle. The client marks the
-loopback endpoint as externally managed so it never mistakes the tunnel for a
-host `scrapd` and starts or kills a host process.
+vm-shell`, and `make vm-delete` own its lifecycle. A user systemd service in
+the VM owns `scrapd`; local clients only communicate with its forwarded API.
 
 ### Future drivers
 
@@ -60,12 +59,11 @@ The remote transport must eventually use authentication and a private network
 such as Tailscale. The Lima implementation binds only to host loopback and does
 not by itself define the remote deployment security model.
 
-### Explicit host mode
+### No host mode
 
-Direct host setup remains available for trusted provider development. It has a
-weaker boundary, especially on Linux where containers share the host kernel,
-and must be requested explicitly with `make host-up`. It is not the default
-installation topology.
+Direct host, directory, and direct-Docker modes are unsupported. The worker VM
+and OpenShell path is mandatory so normal and development workflows exercise
+the same protection boundary.
 
 ## Consequences
 

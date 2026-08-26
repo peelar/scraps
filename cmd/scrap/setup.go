@@ -24,14 +24,10 @@ const (
 //go:embed files/workspace.Dockerfile
 var workspaceDockerfile []byte
 
-const setupUsage = `usage: scrap setup [--image IMAGE]
+const setupUsage = `usage: scrap _worker-setup [--image IMAGE]
 
 Install and start the pinned OpenShell release and build Scraps' workspace
-image. This is an idempotent, local-machine operation. It does not start
-scrapd; follow it with ` + "`scrap up`" + `.
-
-Set SCRAPD_PROVIDER=docker to prepare only the direct Docker backend.
-Directory mode requires no setup.
+image. This idempotent provisioning command runs inside the worker VM.
 `
 
 func runSetup(args []string) int {
@@ -54,19 +50,6 @@ func runSetup(args []string) int {
 		return setupError(err)
 	}
 
-	provider := os.Getenv("SCRAPD_PROVIDER")
-	if provider == "" {
-		provider = "openshell"
-	}
-	if provider == "directory" {
-		fmt.Println("✓ directory provider needs no infrastructure setup (it is not isolated)")
-		return 0
-	}
-	if provider != "openshell" && provider != "docker" {
-		fmt.Fprintf(os.Stderr, "scrap: unsupported provider %q\n", provider)
-		return 1
-	}
-
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	defer cancel()
 	if err := requireCommand("docker"); err != nil {
@@ -75,16 +58,13 @@ func runSetup(args []string) int {
 	if err := runQuietCommand(ctx, "docker", "info"); err != nil {
 		return setupError(fmt.Errorf("Docker is not ready: %w", err))
 	}
-	if provider == "openshell" {
-		if err := ensureOpenShell(ctx); err != nil {
-			return setupError(err)
-		}
+	if err := ensureOpenShell(ctx); err != nil {
+		return setupError(err)
 	}
 	if err := buildWorkspaceImage(ctx, *image); err != nil {
 		return setupError(err)
 	}
 	fmt.Printf("✓ workspace image ready — %s\n", *image)
-	fmt.Println("Next: scrap up")
 	return 0
 }
 
@@ -103,9 +83,6 @@ func installPiExtension() error {
 
 func imageFromEnv() string {
 	if image := os.Getenv("SCRAPD_OPENSHELL_IMAGE"); image != "" {
-		return image
-	}
-	if image := os.Getenv("SCRAPD_DOCKER_IMAGE"); image != "" {
 		return image
 	}
 	return defaultImage
@@ -185,7 +162,7 @@ func runQuietCommand(ctx context.Context, name string, args ...string) error {
 }
 
 func setupError(err error) int {
-	fmt.Fprintf(os.Stderr, "scrap setup: %v\n", err)
+	fmt.Fprintf(os.Stderr, "scrap worker setup: %v\n", err)
 	return 1
 }
 

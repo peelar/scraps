@@ -19,7 +19,6 @@ func newClientFromEnv() *client.Client {
 }
 
 func runList(_ []string) int {
-	ensureDaemonAuto()
 	api := newClientFromEnv()
 	workspaces, err := api.ListWorkspaces(context.Background())
 	if err != nil {
@@ -49,7 +48,6 @@ func runWorkspaceState(command string, args []string) int {
 		fmt.Fprintf(os.Stderr, "usage: scrap %s <workspace-id>\n", command)
 		return 2
 	}
-	ensureDaemonAuto()
 	api := newClientFromEnv()
 	var err error
 	if command == "start" {
@@ -76,7 +74,6 @@ func runRemove(args []string) int {
 	}
 
 	api := newClientFromEnv()
-	ensureDaemonAuto()
 	failed := false
 	for _, id := range args {
 		if err := api.DeleteWorkspace(context.Background(), id); err != nil {

@@ -17,16 +17,9 @@ Commands:
   start <id>    Start a stopped workspace
   stop <id>     Stop a running workspace
   rm <id>...    Remove workspaces
-  up            Ensure the local scrapd daemon is running
-  down          Stop the local scrapd daemon
   status        Show daemon and workspace status
-  setup         Install/check OpenShell and build the workspace image
+  configure     Configure local worker VM sizing
   auth github   Configure a brokered GitHub push credential
-  attach        Attach to a workspace (not implemented)
-  ssh           Open a workspace shell (not implemented)
-  open          Open a project preview (not implemented)
-  diff          Show workspace changes (not implemented)
-  sync          Sync changes to the local checkout (not implemented)
   version       Print version information
 
 Environment:
@@ -55,18 +48,16 @@ func run(args []string) int {
 		return runWorkspaceState(command, rest)
 	case "rm":
 		return runRemove(rest)
-	case "setup":
+	case "configure":
+		return runConfigure(rest)
+	case "_worker-setup":
 		return runSetup(rest)
 	case "auth":
 		return runAuth(rest)
-	case "up":
-		return runUp(rest)
-	case "down":
-		return runDown(rest)
 	case "status":
 		return runStatus(rest)
 	default:
-		fmt.Fprintf(os.Stderr, "scrap: command %q is not implemented yet\n", command)
+		fmt.Fprintf(os.Stderr, "scrap: unknown command %q\n", command)
 		return 1
 	}
 }

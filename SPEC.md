@@ -28,17 +28,19 @@ Pi is the primary interactive product surface:
 /scrap-select <workspace>  # attach this Pi session to an existing workspace
 ```
 
-The CLI manages infrastructure and workspace environments:
+The CLI manages workspaces through the daemon; onboarding records worker VM
+CPU, memory, and disk sizing before `make up` creates it. `make up` and `make
+down` manage the local worker VM:
 
 ```bash
-scrap setup
-scrap up
+make configure
+make up
 scrap status
 scrap ls
 scrap start <workspace>
 scrap stop <workspace>
 scrap rm <workspace>
-scrap down
+make down
 ```
 
 The interfaces should remain largely stable even as the implementation evolves.

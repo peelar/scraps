@@ -6,8 +6,9 @@
 > ADRs 0008 and 0009 supersede the default-provider and production-topology
 > portions of this decision: OpenShell is the default control plane, with a
 > shared container pool inside one ordinary Linux worker VM. Proxmox is one
-> future VM host, not a requirement. The provider boundary, directory-mode
-> warning, and direct-Docker baseline remain applicable.
+> future VM host, not a requirement. ADR 0009 was subsequently amended to
+> remove the directory and direct-Docker implementations; those sections below
+> remain only as historical context for the provider abstraction.
 
 ## Context
 
@@ -110,8 +111,8 @@ layout remains server-side, and workspace resources declare the versioned
 ### Personalization and sandbox boundary
 
 Per ADR 0001, containerizing the workspace must not erase the user's agent
-personalization. Global Pi skills and prompts remain local and available to
-`scrap pi`; model credentials remain local as well. They can instruct the agent,
+personalization. Global Pi skills and prompts remain available in ordinary
+local Pi; model credentials remain local as well. They can instruct the agent,
 but all project-facing tool calls must execute in the selected sandbox.
 Executable global Pi extensions are a separate host trust boundary and require
 an explicit policy because they may register local tools outside Scraps'

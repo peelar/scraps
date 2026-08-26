@@ -1,4 +1,4 @@
-package provider
+package testprovider
 
 import (
 	"bufio"
@@ -15,6 +15,7 @@ import (
 	"sync"
 	"syscall"
 
+	"github.com/peelar/scraps/internal/provider"
 	"github.com/peelar/scraps/internal/store"
 	"github.com/peelar/scraps/internal/workspace"
 )
@@ -29,11 +30,11 @@ func NewDirectory(st *store.Store, dataDir string) (*Directory, error) {
 	}
 	return &Directory{manager: manager}, nil
 }
-func (*Directory) Info() Info {
-	return Info{
+func (*Directory) Info() provider.Info {
+	return provider.Info{
 		Name:      "directory",
-		Isolation: IsolationNone,
-		Policy: Policy{
+		Isolation: provider.Isolation("none"),
+		Policy: provider.Policy{
 			Environment:    "minimal",
 			Network:        "host-unrestricted",
 			Resources:      "host-unlimited",
@@ -55,13 +56,13 @@ func (d *Directory) Delete(c context.Context, id string) error             { ret
 
 func (d *Directory) path(id, path string) (string, error) { return d.manager.ResolvePath(id, path) }
 
-func (d *Directory) Exec(ctx context.Context, id string, r ExecRequest, emit func(ExecEvent)) error {
+func (d *Directory) Exec(ctx context.Context, id string, r provider.ExecRequest, emit func(provider.ExecEvent)) error {
 	w, err := d.Get(ctx, id)
 	if err != nil {
 		return err
 	}
 	if w.State != "running" {
-		return &InvalidRequestError{Message: "workspace is stopped: " + id}
+		return &provider.InvalidRequestError{Message: "workspace is stopped: " + id}
 	}
 	cwd := r.CWD
 	if cwd == "" {
@@ -72,7 +73,7 @@ func (d *Directory) Exec(ctx context.Context, id string, r ExecRequest, emit fun
 		return err
 	}
 	if info, err := os.Stat(cwd); err != nil || !info.IsDir() {
-		return &InvalidRequestError{Message: "working directory does not exist: " + r.CWD}
+		return &provider.InvalidRequestError{Message: "working directory does not exist: " + r.CWD}
 	}
 	hostRoot, err := d.path(id, ".")
 	if err != nil {
@@ -106,14 +107,14 @@ func (d *Directory) Exec(ctx context.Context, id string, r ExecRequest, emit fun
 	if err := cmd.Start(); err != nil {
 		return err
 	}
-	emit(ExecEvent{Type: "start", PID: cmd.Process.Pid})
+	emit(provider.ExecEvent{Type: "start", PID: cmd.Process.Pid})
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go copyOutput(&wg, stdout, "stdout", hostRoot, emit)
 	go copyOutput(&wg, stderr, "stderr", hostRoot, emit)
 	wg.Wait()
 	waitErr := cmd.Wait()
-	e := ExecEvent{Type: "exit"}
+	e := provider.ExecEvent{Type: "exit"}
 	var exitErr *exec.ExitError
 	switch {
 	case waitErr == nil:
@@ -133,14 +134,14 @@ func (d *Directory) Exec(ctx context.Context, id string, r ExecRequest, emit fun
 	return nil
 }
 
-func copyOutput(wg *sync.WaitGroup, r io.Reader, stream, hostRoot string, emit func(ExecEvent)) {
+func copyOutput(wg *sync.WaitGroup, r io.Reader, stream, hostRoot string, emit func(provider.ExecEvent)) {
 	defer wg.Done()
 	b := make([]byte, 32*1024)
 	for {
 		n, err := r.Read(b)
 		if n > 0 {
 			data := []byte(strings.ReplaceAll(string(b[:n]), hostRoot, workspace.VirtualRoot))
-			emit(ExecEvent{Type: "output", Stream: stream, Data: data})
+			emit(provider.ExecEvent{Type: "output", Stream: stream, Data: data})
 		}
 		if err != nil {
 			return
@@ -176,11 +177,6 @@ func directoryEnvironment(hostRoot string, requested map[string]string) ([]strin
 	return out, nil
 }
 
-// InvalidRequestError reports a provider operation invalid for the requested path/state.
-type InvalidRequestError struct{ Message string }
-
-func (e *InvalidRequestError) Error() string { return e.Message }
-
 func (d *Directory) ReadFile(_ context.Context, id, path string, max int64) ([]byte, fs.FileInfo, error) {
 	p, err := d.path(id, path)
 	if err != nil {
@@ -196,10 +192,10 @@ func (d *Directory) ReadFile(_ context.Context, id, path string, max int64) ([]b
 		return nil, nil, err
 	}
 	if info.IsDir() {
-		return nil, nil, &InvalidRequestError{Message: "path is a directory: " + path}
+		return nil, nil, &provider.InvalidRequestError{Message: "path is a directory: " + path}
 	}
 	if info.Size() > max {
-		return nil, nil, &InvalidRequestError{Message: "file exceeds 100MB limit"}
+		return nil, nil, &provider.InvalidRequestError{Message: "file exceeds 100MB limit"}
 	}
 	b, err := io.ReadAll(io.LimitReader(f, max+1))
 	return b, info, err
@@ -228,12 +224,12 @@ func (d *Directory) Stat(_ context.Context, id, path string) (fs.FileInfo, error
 	}
 	return os.Stat(p)
 }
-func (d *Directory) Access(_ context.Context, id, path string, mode AccessMode) error {
+func (d *Directory) Access(_ context.Context, id, path string, mode provider.AccessMode) error {
 	p, e := d.path(id, path)
 	if e != nil {
 		return e
 	}
-	if mode == AccessRead {
+	if mode == provider.AccessRead {
 		f, e := os.Open(p)
 		if e != nil {
 			return e
@@ -264,7 +260,7 @@ func (d *Directory) ReadDir(_ context.Context, id, path string) ([]string, error
 
 var ignored = map[string]bool{".git": true, "node_modules": true, ".DS_Store": true}
 
-func (d *Directory) Glob(ctx context.Context, id string, r GlobRequest) ([]string, error) {
+func (d *Directory) Glob(ctx context.Context, id string, r provider.GlobRequest) ([]string, error) {
 	if _, e := d.Get(ctx, id); e != nil {
 		return nil, e
 	}
@@ -278,7 +274,7 @@ func (d *Directory) Glob(ctx context.Context, id string, r GlobRequest) ([]strin
 	}
 	info, e := os.Stat(root)
 	if e != nil || !info.IsDir() {
-		return nil, &InvalidRequestError{Message: "search path is not a directory: " + r.Path}
+		return nil, &provider.InvalidRequestError{Message: "search path is not a directory: " + r.Path}
 	}
 	limit := r.Limit
 	if limit <= 0 {
@@ -321,7 +317,7 @@ func compileGlob(pattern string) func(string) bool {
 	return m.MatchString
 }
 
-func (d *Directory) Grep(ctx context.Context, id string, r GrepRequest) (GrepResult, error) {
+func (d *Directory) Grep(ctx context.Context, id string, r provider.GrepRequest) (provider.GrepResult, error) {
 	var matcher func(string) bool
 	if r.Literal {
 		needle := r.Pattern
@@ -338,12 +334,12 @@ func (d *Directory) Grep(ctx context.Context, id string, r GrepRequest) (GrepRes
 		}
 		re, e := regexp.Compile(flags + r.Pattern)
 		if e != nil {
-			return GrepResult{}, &InvalidRequestError{Message: "invalid pattern: " + e.Error()}
+			return provider.GrepResult{}, &provider.InvalidRequestError{Message: "invalid pattern: " + e.Error()}
 		}
 		matcher = re.MatchString
 	}
 	if _, e := d.Get(ctx, id); e != nil {
-		return GrepResult{}, e
+		return provider.GrepResult{}, e
 	}
 	root := r.Path
 	if root == "" {
@@ -351,11 +347,11 @@ func (d *Directory) Grep(ctx context.Context, id string, r GrepRequest) (GrepRes
 	}
 	root, e := d.path(id, root)
 	if e != nil {
-		return GrepResult{}, e
+		return provider.GrepResult{}, e
 	}
 	info, e := os.Stat(root)
 	if e != nil || !info.IsDir() {
-		return GrepResult{}, &InvalidRequestError{Message: "search path is not a directory: " + r.Path}
+		return provider.GrepResult{}, &provider.InvalidRequestError{Message: "search path is not a directory: " + r.Path}
 	}
 	limit := r.Limit
 	if limit <= 0 {
@@ -366,10 +362,10 @@ func (d *Directory) Grep(ctx context.Context, id string, r GrepRequest) (GrepRes
 	if r.Glob != "" {
 		gm = compileGlob(r.Glob)
 	}
-	result := GrepResult{Matches: []GrepMatch{}}
+	result := provider.GrepResult{Matches: []provider.GrepMatch{}}
 	workspaceRoot, e := d.path(id, ".")
 	if e != nil {
-		return GrepResult{}, e
+		return provider.GrepResult{}, e
 	}
 	_ = filepath.WalkDir(root, func(path string, de fs.DirEntry, e error) error {
 		if e != nil {
@@ -408,7 +404,7 @@ func searchable(path string, gm func(string) bool) bool {
 	n, _ := f.Read(b)
 	return !strings.ContainsRune(string(b[:n]), 0)
 }
-func grepFile(path, displayPath string, matcher func(string) bool, c, budget int) []GrepMatch {
+func grepFile(path, displayPath string, matcher func(string) bool, c, budget int) []provider.GrepMatch {
 	f, e := os.Open(path)
 	if e != nil {
 		return nil
@@ -423,17 +419,17 @@ func grepFile(path, displayPath string, matcher func(string) bool, c, budget int
 	if s.Err() != nil {
 		return nil
 	}
-	var out []GrepMatch
+	var out []provider.GrepMatch
 	for i, line := range lines {
 		if !matcher(line) {
 			continue
 		}
-		m := GrepMatch{Path: displayPath, LineNumber: i + 1, LineText: line, Lines: []GrepLine{}}
+		m := provider.GrepMatch{Path: displayPath, LineNumber: i + 1, LineText: line, Lines: []provider.GrepLine{}}
 		if c > 0 {
 			start := max(i+1-c, 1)
 			end := min(i+1+c, len(lines))
 			for n := start; n <= end; n++ {
-				m.Lines = append(m.Lines, GrepLine{N: n, Text: lines[n-1], Match: n == i+1})
+				m.Lines = append(m.Lines, provider.GrepLine{N: n, Text: lines[n-1], Match: n == i+1})
 			}
 		}
 		out = append(out, m)

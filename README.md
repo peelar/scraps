@@ -17,11 +17,17 @@ From a source checkout, install the contributor dependencies (Go 1.25+, Node.js
 
 ```bash
 pnpm install
+make configure  # choose worker CPU, memory, and disk sizing
 make up
 pi
 # Then, inside Pi:
 /scrap
 ```
+
+`make configure` stores worker sizing in `~/.config/scraps/worker.conf` (the
+XDG config directory is respected). The defaults are 4 CPUs, 8 GiB memory, and
+60 GiB disk. Size changes apply when the VM is created; use `make vm-delete`
+before recreating an existing VM at a different size.
 
 `make up` creates an ordinary Linux worker VM with Lima, copies Linux Scraps
 binaries into it, installs OpenShell there, builds the workspace image, and
@@ -31,9 +37,8 @@ down` to stop the VM, `make vm-shell` for diagnostics, and `make vm-delete` to
 remove the VM and all of its workspace data.
 
 The packaged-user flow is ready for future release archives and Homebrew, but
-has not been published yet. `scrap setup` followed by `scrap up` remains the
-explicit, weaker-boundary host mode; contributors can invoke it with `make
-host-up`.
+has not been published yet. The worker VM is the only supported deployment;
+Scraps does not run workspace processes directly on the developer host.
 
 `/scrap [project]` creates a workspace, switches all project-facing tools to
 it, and fails closed if the daemon cannot be reached. Attach to an existing
@@ -62,16 +67,11 @@ putting it in process arguments, attaches a push-only provider to workspaces,
 and leaves GitHub API mutations blocked. `--from-gh` imports the host `gh`
 credential; `--token-stdin` reads from a password manager or pipe.
 
-The direct Docker backend remains available for host development with
-`SCRAPD_PROVIDER=docker make host-up`. For trusted development without
-isolation, use `SCRAPD_PROVIDER=directory make host-up`.
-
 ## Where it is today
 
-Scraps is an early prototype. Directory mode uses **literal directories and
-host processes—it is not a security sandbox**. OpenShell is the default sandbox
-control plane. The default local deployment places the entire OpenShell
-container pool inside one ordinary Linux worker VM. Lima is the first local VM
+Scraps is an early prototype. OpenShell is the only workspace control plane.
+The local deployment places the entire OpenShell container pool inside one
+ordinary Linux worker VM. Lima is the first local VM
 driver, not an architectural requirement; a VM hosted by Proxmox is one future
 remote deployment target.
 
@@ -89,7 +89,7 @@ has been published yet.
 ```bash
 make check
 make build
-make dev-daemon  # foreground logs
+make vm-shell  # worker diagnostics
 ```
 
 - [`SPEC.md`](./SPEC.md) — product direction

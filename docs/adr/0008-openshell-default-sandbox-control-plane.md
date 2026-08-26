@@ -33,20 +33,16 @@ dedicated Linux worker VM. Lima supplies the initial local VM; a remote
 hypervisor such as Proxmox may supply it later. We do not require a VM per
 workspace.
 
-The direct Docker provider remains an explicit development/fallback backend.
-Directory mode remains non-isolated trusted development only.
+The earlier direct-Docker and directory development backends have been
+removed. OpenShell inside the worker VM is the only supported workspace path.
 
-## User-visible success criteria
+## Operator fit
 
-OpenShell is retained as the default only if:
-
-1. users can immediately observe useful policy or credential isolation beyond
-   the direct Docker prototype; and
-2. installation, startup, workspace latency, upgrades, recovery, and removal
-   remain suitable for one personally managed server.
-
-Issue #10 owns the live policy demonstration, conformance suite, benchmarks,
-and operating runbook.
+OpenShell is retained as the default because it is working well for the current
+personal, single-user deployment and keeps sandbox infrastructure outside
+Scraps. Formal comparative benchmarks and a separate adoption gate are not
+required for this project stage. Operational problems should be filed as
+concrete issues when they affect real use.
 
 ## Consequences
 

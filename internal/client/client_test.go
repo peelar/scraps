@@ -7,19 +7,33 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/peelar/scraps/internal/server"
+	"github.com/peelar/scraps/internal/store"
+	"github.com/peelar/scraps/internal/testprovider"
 )
 
 func newTestClient(t *testing.T, token string) *Client {
 	t.Helper()
-	apiServer, err := server.New(server.Config{DataDir: t.TempDir(), Token: token})
+	dataDir := t.TempDir()
+	st, err := store.Open(filepath.Join(dataDir, "scrapd.db"))
 	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	runtime, err := testprovider.NewDirectory(st, dataDir)
+	if err != nil {
+		st.Close()
+		t.Fatalf("new test provider: %v", err)
+	}
+	apiServer, err := server.New(server.Config{DataDir: dataDir, Token: token, Provider: runtime})
+	if err != nil {
+		st.Close()
 		t.Fatalf("new server: %v", err)
 	}
-	t.Cleanup(apiServer.Close)
+	t.Cleanup(func() { apiServer.Close(); st.Close() })
 	testServer := httptest.NewServer(apiServer.Handler())
 	t.Cleanup(testServer.Close)
 	return New(testServer.URL, token)
