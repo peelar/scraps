@@ -1,115 +1,61 @@
-# Scraps
+# Scraps 🧰
 
-Self-hosted agent workspaces on hardware you already own.
+**Give Pi a fresh computer without taking away what makes it yours.**
 
-This repository contains the Linux-targeted Scraps control plane, CLI, and agent
-integration. macOS is supported as a development environment and as a future
-CLI client; production workloads will run on Linux.
-
-See [SPEC.md](./SPEC.md) for the product direction and
-[docs/adr](./docs/adr) for accepted architectural decisions.
-
-## Repository layout
+Scraps creates self-hosted agent workspaces while Pi stays comfortably local:
+your skills, prompts, models, credentials, sessions, and TUI come with you;
+project files and commands live in the workspace.
 
 ```text
-cmd/scrap/                 local CLI
-cmd/scrapd/                Linux daemon
-internal/                  private Go packages
-packages/pi-extension/     Pi extension: local Pi, remote workspace tools (ADR 0001)
+local Pi + your personality  ─── remote tools ───▶  disposable dev computer
 ```
 
-## Requirements
+## Try it
 
-- Go 1.24+
-- Node.js 22+
-- pnpm 10+
-
-## Development
+Requirements: Go 1.24+, Node.js 22+, and pnpm 10+.
 
 ```bash
 pnpm install
+make up
+scrap pi
+```
+
+Or arrive with a task:
+
+```bash
+scrap pi --repo https://github.com/you/project.git "fix the flaky test"
+```
+
+Useful commands:
+
+```bash
+scrap ls                 # workspaces waiting for you
+scrap pi --workspace ID  # jump back in
+scrap rm ID              # sweep up
+scrap status             # check the daemon
+scrap down               # lights out
+```
+
+## Where it is today
+
+Scraps is an early prototype. The current provider uses **literal directories
+and host processes—it is not a security sandbox yet**. Docker is the next
+provider; Proxmox VMs are the production destination.
+
+Pi already runs locally with seven fail-closed, workspace-backed tools:
+`bash`, `read`, `write`, `edit`, `ls`, `find`, and `grep`.
+
+## Hacking
+
+```bash
 make check
 make build
+make dev-daemon  # foreground logs
 ```
 
-Built executables are written to `bin/`. Start the development daemon with
-`make dev-daemon`; it listens on `127.0.0.1:8484` by default.
+- [`SPEC.md`](./SPEC.md) — product direction
+- [`docs/adr`](./docs/adr) — architecture and sandbox roadmap
+- `cmd/scrap` / `cmd/scrapd` — Go CLI and daemon
+- `packages/pi-extension` — remote-backed Pi tools
 
-## Quick start
-
-```bash
-make up     # build if needed, (re)start the local daemon, show status
-scrap pi    # that's it — fresh workspace, interactive Pi
-```
-
-`make up` is the one-command entry point: it builds `bin/scrap` and
-`bin/scrapd` when sources changed, installs stable `scrap`/`scrapd` symlinks
-into `~/.local/bin` (override with `INSTALL_DIR=...`), kills a hung or stale
-daemon (one running older code than the freshly built binary), starts a new
-one detached, and waits until it is healthy. Daemon lifecycle is also managed implicitly —
-`scrap pi`, `scrap ls`, and `scrap rm` start the daemon automatically when it
-is not running, so most days you never think about it.
-
-Explicit control:
-
-```bash
-scrap up [--restart]   # ensure daemon: start, or restart hung/stale
-scrap status           # daemon version, uptime, data dir, workspaces
-scrap down             # stop the daemon
-make dev-daemon        # foreground daemon for reading logs while hacking
-```
-
-Supervision files live in `~/.scrap/` (`scrapd-<port>.pid`, `scrapd-<port>.log`).
-Remote daemons (`SCRAP_DAEMON_URL` pointing elsewhere) are never managed or
-restarted locally.
-
-## Pi integration
-
-Per [ADR 0001](./docs/adr/0001-local-pi-with-remote-workspace-tools.md), the
-canonical interactive integration runs Pi locally and executes the seven
-project-facing tools (`bash`, `read`, `write`, `edit`, `ls`, `find`, `grep`)
-in a remote Scraps workspace. The daemon API is specified in
-[ADR 0002](./docs/adr/0002-scrapd-workspace-api.md).
-
-The convenience launcher resolves or creates a workspace, then starts local
-Pi with the extension (embedded in the `scrap` binary) and fail-closed tool
-replacement:
-
-```bash
-make up                        # daemon is up, workspace-ready
-scrap pi                       # fresh workspace, interactive Pi
-scrap pi "fix the flaky test"  # fresh workspace + opening prompt
-scrap pi --workspace <id>      # attach to an existing workspace
-scrap pi --repo <http-url>     # clone a (public) repo into the workspace
-scrap ls                       # list workspaces
-scrap rm <id>...               # remove workspaces
-```
-
-Set `SCRAP_EXTENSION_PATH` to point `scrap pi` at a source checkout of the
-extension during development. While `--scrap` is active the tools fail
-closed — with no reachable workspace they error visibly and never fall back
-to the local machine.
-
-An LLM-free integration harness for the full extension↔daemon surface lives
-at `packages/pi-extension/scripts/integration.ts`:
-
-```bash
-node packages/pi-extension/scripts/integration.ts http://127.0.0.1:8484 [workspace-id]
-```
-
-## Configuration
-
-`scrapd` recognizes:
-
-- `SCRAPD_LISTEN_ADDR` — HTTP listen address (default `127.0.0.1:8484`)
-- `SCRAPD_DATA_DIR` — data directory for the SQLite store and workspace
-  directories (default `~/.config/scrapd`)
-- `SCRAPD_TOKEN` — when set, all `/v1` requests require
-  `Authorization: Bearer <token>`
-
-`scrap` recognizes `SCRAP_DAEMON_URL`, `SCRAP_TOKEN`, and `SCRAPD_PATH`
-(where to find the daemon binary for auto-start; by default next to `scrap`
-or `./bin/scrapd`). The workspace API
-covers lifecycle (`POST/GET/DELETE /v1/workspaces`), streaming execution
-(`POST /v1/workspaces/{id}/exec`, NDJSON events), and file/search operations
-(`POST /v1/workspaces/{id}/files/{read,write,mkdir,stat,access,readdir,glob,grep}`).
+Built from scraps, naturally. ♻️
