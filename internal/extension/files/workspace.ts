@@ -25,7 +25,7 @@ export const DEFAULT_REMOTE_ROOT = VIRTUAL_WORKSPACE_ROOT;
 
 export type ConnectionState =
 	| { readonly status: "disconnected"; readonly reason?: string }
-	| { readonly status: "connected"; readonly workspace: WorkspaceRecord };
+	| { readonly status: "connected"; readonly workspace: WorkspaceRecord; readonly provider?: string };
 
 export const DISCONNECTED_TOOL_MESSAGE =
 	"Scraps remote workspace is not connected; local execution is disabled " +
@@ -51,6 +51,13 @@ export class WorkspaceSession {
 			config.daemonUrl === undefined
 				? undefined
 				: this.clientFactory(config.daemonUrl, config.token);
+		this.state = { status: "disconnected" };
+	}
+
+	/** Explicitly return project tools to the local computer. */
+	deactivate(): void {
+		this.config = undefined;
+		this.client = undefined;
 		this.state = { status: "disconnected" };
 	}
 
@@ -128,7 +135,8 @@ export class WorkspaceSession {
 		try {
 			const workspace = await client.getWorkspace(id);
 			assertCompatibleWorkspace(workspace);
-			this.state = { status: "connected", workspace };
+			const provider = await providerName(client);
+			this.state = { status: "connected", workspace, ...(provider === undefined ? {} : { provider }) };
 			return workspace;
 		} catch (error) {
 			this.state = {
@@ -146,7 +154,8 @@ export class WorkspaceSession {
 			...(project === undefined ? {} : { project }),
 		});
 		assertCompatibleWorkspace(workspace);
-		this.state = { status: "connected", workspace };
+		const provider = await providerName(client);
+		this.state = { status: "connected", workspace, ...(provider === undefined ? {} : { provider }) };
 		return workspace;
 	}
 
@@ -166,6 +175,15 @@ export class WorkspaceSession {
 		const workspace = this.requireWorkspace();
 		await this.requireClient().deleteWorkspace(workspace.id);
 		this.disconnect(`workspace ${workspace.id} deleted`);
+	}
+}
+
+async function providerName(client: ScrapdClient): Promise<string | undefined> {
+	try {
+		return (await client.info()).provider;
+	} catch {
+		// Workspace attachment is authoritative; provider display is best-effort.
+		return undefined;
 	}
 }
 
@@ -196,7 +214,7 @@ export function statusText(session: WorkspaceSession): string | undefined {
 	}
 	const connection = session.connection;
 	if (connection.status === "connected") {
-		return `scrap:${connection.workspace.id}`;
+		return `scrap:${connection.provider ?? "remote"}:${connection.workspace.id}:${connection.workspace.state}`;
 	}
 	return "scrap:disconnected";
 }
@@ -204,7 +222,7 @@ export function statusText(session: WorkspaceSession): string | undefined {
 /** Human-readable summary for the /scrap command. */
 export function describeSession(session: WorkspaceSession): string {
 	if (!session.remoteMode) {
-		return "Pi is running locally without Scraps (--scrap not given).";
+		return "Pi project tools are local. Run /scrap to attach a remote workspace.";
 	}
 
 	const lines = [
@@ -217,6 +235,7 @@ export function describeSession(session: WorkspaceSession): string {
 	if (connection.status === "connected") {
 		lines.push(
 			`Status: connected (${connection.workspace.state})`,
+			`Provider: ${connection.provider ?? "unknown"}`,
 			`Project: ${connection.workspace.project ?? session.project ?? "unknown"}`,
 			`Remote root: ${session.root}`,
 		);

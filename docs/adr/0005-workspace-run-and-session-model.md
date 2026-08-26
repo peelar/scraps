@@ -37,7 +37,7 @@ is observing; it does not own their lifecycle.
 
 ### Interactive mode
 
-The canonical `scrap pi` flow continues to run Pi locally and route its
+The canonical ordinary-Pi `/scrap` flow runs Pi locally and routes its
 project-facing tools to the workspace. The local Pi process owns the agent loop,
 so disconnecting it ends that interactive execution but does not delete the
 workspace.

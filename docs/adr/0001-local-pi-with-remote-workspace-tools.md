@@ -42,22 +42,25 @@ Developer machine                         Linux infrastructure
 └────────────────────────┘                └──────────────────────────┘
 ```
 
-The primary direct invocation will be:
+The primary invocation is ordinary, local Pi with the globally installed
+Scraps extension:
 
-```bash
-pi --scrap
-pi --scrap --workspace <workspace>
+```text
+pi
+/scrap [project]
+/scrap-select <workspace>
+/scrap toss
 ```
 
-`scrap pi [prompt]` will remain part of the public CLI. It is a convenience
-launcher that resolves or creates a workspace and starts local Pi with the
-Scraps extension and workspace identity. It is not a separate agent runtime.
+The earlier `pi --scrap` startup mode remains a compatibility and test input.
+The temporary `scrap pi` launcher was removed after dynamic activation reached
+the same fail-closed tool boundary without requiring a second entry point.
 
 ### Local personalization is a product requirement
 
 Scraps will deliberately preserve the user's local Pi personalization layer:
 global skills, prompts, model/provider configuration, credentials, themes, and
-session history remain available in `scrap pi`. Losing this layer is a common
+session history remain available in ordinary local Pi. Losing this layer is a common
 weakness of cloud agents and would undermine the benefit of running Pi locally.
 Skills and prompts are treated as instructions for the agent, while repository
 state and project-affecting execution remain in the workspace.
@@ -87,6 +90,17 @@ The extension will:
 While remote mode is active, project-facing tools must fail closed. Loss of the
 daemon or workspace must produce a visible error and must never cause silent
 fallback to the developer machine.
+
+Ordinary Pi starts with its local built-ins. `/scrap` synchronously installs the
+seven same-name remote overrides before attempting workspace acquisition. If
+activation fails, those overrides remain active but disconnected, the footer
+shows that state, and every project tool fails closed. `/scrap toss` confirms,
+permanently deletes the attached workspace, and only after successful deletion
+returns the overrides and `!`/`!!` to local execution. Successful attachments
+append a non-context Pi session entry containing the daemon URL, workspace ID,
+and project hint; `/resume` reconstructs and verifies that association before
+use. Tokens and other credentials are resolved afresh and are never persisted
+in the session entry. A new unbound Pi session starts locally.
 
 `scrapd` will expose structured, authenticated workspace operations rather than
 requiring the extension to assemble SSH commands. The initial API surface will
@@ -167,17 +181,14 @@ implementation. It creates conflict and consistency problems and weakens the
 workspace as the authoritative development computer. Handoff will instead use
 explicit Git, diff, artifact, or sync operations.
 
-## Follow-up work
+## Implementation status and remaining work
 
-1. Define the remote tool compatibility contract and failure semantics.
-2. Define the authenticated, streaming `scrapd` workspace API.
-3. Implement workspace selection and Pi-session binding.
-4. Replace the seven built-in Pi tools behind an explicit `--scrap` flag.
-5. Add remote-state UI, system-prompt context, and disconnect tests.
-6. Implement `scrap pi` as the convenience launcher.
-7. Define and implement a Pi resource policy that explicitly preserves global
-   skills/prompts while auditing or restricting executable extensions capable
-   of adding host-backed project tools.
+The remote API, seven tool replacements, ordinary-Pi `/scrap` activation,
+workspace selection, Pi-session binding, resume, visible remote state, and
+fail-closed tests are implemented. The temporary `scrap pi` launcher is
+obsolete. The remaining architectural follow-up is a Pi resource policy that
+preserves global skills and prompts while auditing or restricting executable
+extensions capable of adding host-backed project tools (issue #4).
 
 ## References
 

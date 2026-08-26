@@ -3,8 +3,8 @@
  *
  * Replaces Pi's seven project-facing tools (bash, read, write, edit, ls,
  * find, grep) with remote-workspace implementations (ADR 0001). Registration
- * happens only while remote mode is active; without `--scrap` the extension
- * leaves Pi's built-in tools completely untouched.
+ * occurs when `/scrap`, `/scrap-select`, or the compatibility startup flag
+ * activates remote mode; before that Pi's built-ins remain untouched.
  *
  * read/write/edit/bash/ls/find reuse Pi's own tool factories with remote
  * operations, so result shapes, rendering, truncation, and exact-match edit
@@ -12,9 +12,9 @@
  * execute path (it spawns a local ripgrep), so it runs `rg` inside the
  * workspace through the streaming exec endpoint.
  *
- * There is no local fallback anywhere in this module: when the workspace is
- * not connected, the operations layer throws and the tool call fails
- * visibly.
+ * While remote mode is active there is no local fallback: a disconnected
+ * workspace fails closed. After `/scrap toss` deletes the workspace, these
+ * same-name overrides delegate back to Pi's local implementations.
  */
 
 import {
@@ -57,49 +57,62 @@ export const REMOTE_TOOL_NAMES = [
 export function registerRemoteTools(pi: ExtensionAPI, session: WorkspaceSession): void {
 	// Tools are (re)built per execution so a mid-session `/scrap-select` or
 	// late workspace discovery is picked up without re-registering anything.
-	const readTool = () => createReadTool(session.root, { operations: createRemoteReadOps(session) });
-	const writeTool = () => createWriteTool(session.root, { operations: createRemoteWriteOps(session) });
-	const editTool = () => createEditTool(session.root, { operations: createRemoteEditOps(session) });
-	const bashTool = () => createBashTool(session.root, { operations: createRemoteBashOps(session) });
-	const lsTool = () => createLsTool(session.root, { operations: createRemoteLsOps(session) });
-	const findTool = () => createFindTool(session.root, { operations: createRemoteFindOps(session) });
+	const readTool = (cwd: string) => session.remoteMode
+		? createReadTool(session.root, { operations: createRemoteReadOps(session) })
+		: createReadTool(cwd);
+	const writeTool = (cwd: string) => session.remoteMode
+		? createWriteTool(session.root, { operations: createRemoteWriteOps(session) })
+		: createWriteTool(cwd);
+	const editTool = (cwd: string) => session.remoteMode
+		? createEditTool(session.root, { operations: createRemoteEditOps(session) })
+		: createEditTool(cwd);
+	const bashTool = (cwd: string) => session.remoteMode
+		? createBashTool(session.root, { operations: createRemoteBashOps(session) })
+		: createBashTool(cwd);
+	const lsTool = (cwd: string) => session.remoteMode
+		? createLsTool(session.root, { operations: createRemoteLsOps(session) })
+		: createLsTool(cwd);
+	const findTool = (cwd: string) => session.remoteMode
+		? createFindTool(session.root, { operations: createRemoteFindOps(session) })
+		: createFindTool(cwd);
+	const metadataCwd = session.root;
 
 	// Same-name registration overrides the built-in tool; metadata (schema,
 	// description, renderers) comes from Pi's own factory.
 	pi.registerTool({
-		...readTool(),
-		async execute(toolCallId, params, signal, onUpdate) {
-			return readTool().execute(toolCallId, params, signal, onUpdate);
+		...readTool(metadataCwd),
+		async execute(toolCallId, params, signal, onUpdate, ctx) {
+			return readTool(ctx.cwd).execute(toolCallId, params, signal, onUpdate);
 		},
 	});
 	pi.registerTool({
-		...writeTool(),
-		async execute(toolCallId, params, signal, onUpdate) {
-			return writeTool().execute(toolCallId, params, signal, onUpdate);
+		...writeTool(metadataCwd),
+		async execute(toolCallId, params, signal, onUpdate, ctx) {
+			return writeTool(ctx.cwd).execute(toolCallId, params, signal, onUpdate);
 		},
 	});
 	pi.registerTool({
-		...editTool(),
-		async execute(toolCallId, params, signal, onUpdate) {
-			return editTool().execute(toolCallId, params, signal, onUpdate);
+		...editTool(metadataCwd),
+		async execute(toolCallId, params, signal, onUpdate, ctx) {
+			return editTool(ctx.cwd).execute(toolCallId, params, signal, onUpdate);
 		},
 	});
 	pi.registerTool({
-		...bashTool(),
-		async execute(toolCallId, params, signal, onUpdate) {
-			return bashTool().execute(toolCallId, params, signal, onUpdate);
+		...bashTool(metadataCwd),
+		async execute(toolCallId, params, signal, onUpdate, ctx) {
+			return bashTool(ctx.cwd).execute(toolCallId, params, signal, onUpdate);
 		},
 	});
 	pi.registerTool({
-		...lsTool(),
-		async execute(toolCallId, params, signal, onUpdate) {
-			return lsTool().execute(toolCallId, params, signal, onUpdate);
+		...lsTool(metadataCwd),
+		async execute(toolCallId, params, signal, onUpdate, ctx) {
+			return lsTool(ctx.cwd).execute(toolCallId, params, signal, onUpdate);
 		},
 	});
 	pi.registerTool({
-		...findTool(),
-		async execute(toolCallId, params, signal, onUpdate) {
-			return findTool().execute(toolCallId, params, signal, onUpdate);
+		...findTool(metadataCwd),
+		async execute(toolCallId, params, signal, onUpdate, ctx) {
+			return findTool(ctx.cwd).execute(toolCallId, params, signal, onUpdate);
 		},
 	});
 
@@ -113,7 +126,10 @@ function registerRemoteGrep(pi: ExtensionAPI, session: WorkspaceSession): void {
 	const meta: GrepTool = createGrepTool(session.root);
 	pi.registerTool({
 		...meta,
-		async execute(_toolCallId, params) {
+		async execute(toolCallId, params, signal, onUpdate, ctx) {
+			if (!session.remoteMode) {
+				return createGrepTool(ctx.cwd).execute(toolCallId, params, signal, onUpdate);
+			}
 			const input = params as {
 				pattern: string;
 				path?: string;

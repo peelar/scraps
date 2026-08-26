@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { resolveMode } from "./identity.ts";
+import {
+	SESSION_BINDING_ENTRY,
+	resolveMode,
+	resolveSessionMode,
+	restoreSessionBinding,
+} from "./identity.ts";
 
 describe("resolveMode", () => {
 	it("stays local without the --scrap flag", () => {
@@ -50,5 +55,51 @@ describe("resolveMode", () => {
 			assert.equal(mode.config.daemonUrl, "http://127.0.0.1:8484");
 			assert.equal(mode.config.workspaceId, undefined);
 		}
+	});
+});
+
+describe("Pi session workspace bindings", () => {
+	const remote = {
+		version: 1 as const,
+		mode: "remote" as const,
+		daemonUrl: "http://worker:8484",
+		workspaceId: "quiet-river",
+		project: "owner/project",
+	};
+
+	it("restores the latest binding on resume", () => {
+		const binding = restoreSessionBinding([
+			{ type: "custom", customType: SESSION_BINDING_ENTRY, data: remote },
+			{ type: "custom", customType: SESSION_BINDING_ENTRY, data: { version: 1, mode: "local" } },
+			{ type: "custom", customType: SESSION_BINDING_ENTRY, data: remote },
+		]);
+		const mode = resolveSessionMode({ flags: {}, env: { SCRAP_TOKEN: "fresh-token" } }, binding);
+		assert.equal(mode.kind, "remote");
+		if (mode.kind === "remote") {
+			assert.equal(mode.config.workspaceId, "quiet-river");
+			assert.equal(mode.config.daemonUrl, "http://worker:8484");
+			assert.equal(mode.config.token, "fresh-token");
+		}
+	});
+
+	it("starts a new session locally when it has no binding", () => {
+		assert.deepEqual(resolveSessionMode({ flags: {}, env: {} }, undefined), { kind: "local" });
+	});
+
+	it("persists local mode after a tossed workspace", () => {
+		const binding = restoreSessionBinding([
+			{ type: "custom", customType: SESSION_BINDING_ENTRY, data: remote },
+			{ type: "custom", customType: SESSION_BINDING_ENTRY, data: { version: 1, mode: "local" } },
+		]);
+		assert.deepEqual(resolveSessionMode({ flags: {}, env: {} }, binding), { kind: "local" });
+	});
+
+	it("does not persist or restore credentials", () => {
+		const binding = restoreSessionBinding([{
+			type: "custom",
+			customType: SESSION_BINDING_ENTRY,
+			data: { ...remote, token: "must-not-survive" },
+		}]);
+		assert.equal("token" in (binding ?? {}), false);
 	});
 });

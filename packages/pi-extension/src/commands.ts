@@ -1,14 +1,14 @@
 /**
  * Slash commands for workspace status, selection, lifecycle, previews, and
  * explicit synchronization (ADR 0001). Commands are registered in every mode;
- * outside remote mode they explain that `--scrap` is required.
+ * `/scrap` and `/scrap-select` can activate remote mode from ordinary Pi.
  */
 
 import path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 import { DEFAULT_DAEMON_URL } from "./client.ts";
-import type { RemoteConfig } from "./identity.ts";
+import type { RemoteConfig, SessionBinding } from "./identity.ts";
 import { describeError, describeSession, type WorkspaceSession } from "./workspace.ts";
 
 /** Minimal UI surface the commands need (satisfied by ExtensionContext.ui). */
@@ -22,30 +22,69 @@ export function registerScrapCommands(
 	session: WorkspaceSession,
 	refreshStatus: (ui: Ui) => void,
 	activateRemote: (config: RemoteConfig) => void,
+	persistBinding: (binding: SessionBinding) => void,
 ): void {
+	const defaultRemoteConfig = (): RemoteConfig => ({
+		daemonUrl: process.env.SCRAP_DAEMON_URL ?? DEFAULT_DAEMON_URL,
+		workspaceId: process.env.SCRAP_WORKSPACE_ID,
+		project: process.env.SCRAP_PROJECT,
+		token: process.env.SCRAP_TOKEN,
+	});
+	const persistRemote = () => {
+		const project = session.connectedWorkspace?.project ?? session.project;
+		persistBinding({
+			version: 1,
+			mode: "remote",
+			...(session.daemonUrl === undefined ? {} : { daemonUrl: session.daemonUrl }),
+			...(session.workspaceId === undefined ? {} : { workspaceId: session.workspaceId }),
+			...(project === undefined ? {} : { project }),
+		});
+	};
 	const requireRemote = (ui: Ui): boolean => {
 		if (!session.remoteMode) {
-			ui.notify("Not in Scraps mode. Start Pi with --scrap to use a remote workspace.", "warning");
+			ui.notify("Not in Scraps mode. Run /scrap or /scrap-select to attach a workspace.", "warning");
 			return false;
 		}
 		return true;
 	};
 
 	pi.registerCommand("scrap", {
-		description: "Start using a fresh remote Scraps workspace",
+		description: "Attach a remote workspace, or toss it and return local",
 		handler: async (args, ctx) => {
+			if (args.trim() === "toss") {
+				const workspace = session.connectedWorkspace;
+				if (workspace === undefined) {
+					ctx.ui.notify("No connected Scraps workspace to toss.", "warning");
+					return;
+				}
+				const confirmed = await ctx.ui.confirm(
+					"Toss workspace?",
+					`Permanently delete ${workspace.id} and all uncommitted work, then return Pi local?`,
+				);
+				if (!confirmed) return;
+				try {
+					await session.remove();
+					session.deactivate();
+					persistBinding({ version: 1, mode: "local" });
+					refreshStatus(ctx.ui);
+					ctx.ui.notify(`Tossed ${workspace.id}. Project tools and !/!! now run locally.`, "warning");
+				} catch (error) {
+					refreshStatus(ctx.ui);
+					ctx.ui.notify(
+						`Cannot toss ${workspace.id}: ${describeError(error)}. Still using the remote workspace.`,
+						"error",
+					);
+				}
+				return;
+			}
 			if (session.connectedWorkspace !== undefined) {
 				ctx.ui.notify(describeSession(session), "info");
 				return;
 			}
 
 			if (!session.remoteMode) {
-				activateRemote({
-					daemonUrl: process.env.SCRAP_DAEMON_URL ?? DEFAULT_DAEMON_URL,
-					workspaceId: process.env.SCRAP_WORKSPACE_ID,
-					project: process.env.SCRAP_PROJECT,
-					token: process.env.SCRAP_TOKEN,
-				});
+				activateRemote(defaultRemoteConfig());
+				persistRemote();
 				refreshStatus(ctx.ui);
 			}
 
@@ -57,13 +96,14 @@ export function registerScrapCommands(
 								args.trim() || session.project || path.basename(ctx.cwd) || "workspace",
 							)
 						: await session.connect(configuredWorkspace);
+				persistRemote();
 				refreshStatus(ctx.ui);
 				ctx.ui.notify(`Connected to Scraps workspace ${workspace.id}.`, "info");
 			} catch (error) {
 				refreshStatus(ctx.ui);
 				ctx.ui.notify(
 					`Cannot start Scraps workspace: ${describeError(error)}. ` +
-						"Start the daemon with `scrap up`, then run /scrap again.",
+						"Start the worker VM with `make up`, then run /scrap again.",
 					"error",
 				);
 			}
@@ -95,16 +135,19 @@ export function registerScrapCommands(
 	pi.registerCommand("scrap-select", {
 		description: "Attach this Pi session to an existing Scraps workspace",
 		handler: async (args, ctx) => {
-			if (!requireRemote(ctx.ui)) {
-				return;
-			}
 			const id = args.trim();
 			if (id.length === 0) {
 				ctx.ui.notify("Usage: /scrap-select <workspace>", "warning");
 				return;
 			}
+			if (!session.remoteMode) {
+				activateRemote({ ...defaultRemoteConfig(), workspaceId: id });
+				persistRemote();
+				refreshStatus(ctx.ui);
+			}
 			try {
 				const workspace = await session.connect(id);
+				persistRemote();
 				refreshStatus(ctx.ui);
 				ctx.ui.notify(`Connected to Scraps workspace ${workspace.id}.`, "info");
 			} catch (error) {
@@ -123,6 +166,7 @@ export function registerScrapCommands(
 			const project = args.trim();
 			try {
 				const workspace = await session.create(project.length > 0 ? project : undefined);
+				persistRemote();
 				refreshStatus(ctx.ui);
 				ctx.ui.notify(`Created Scraps workspace ${workspace.id}.`, "info");
 			} catch (error) {
@@ -152,6 +196,7 @@ export function registerScrapCommands(
 			}
 			try {
 				await session.remove();
+				persistRemote();
 				refreshStatus(ctx.ui);
 				ctx.ui.notify(`Deleted Scraps workspace ${workspace.id}.`, "info");
 			} catch (error) {
@@ -159,5 +204,4 @@ export function registerScrapCommands(
 			}
 		},
 	});
-
 }

@@ -24,6 +24,16 @@ export type ExtensionMode =
 	| { readonly kind: "local" }
 	| { readonly kind: "remote"; readonly config: RemoteConfig };
 
+export const SESSION_BINDING_ENTRY = "scraps-workspace-v1";
+
+export type SessionBinding = {
+	readonly version: 1;
+	readonly mode: "local" | "remote";
+	readonly daemonUrl?: string;
+	readonly workspaceId?: string;
+	readonly project?: string;
+};
+
 export type IdentityInputs = {
 	/** Raw flag values as reported by `pi.getFlag`. */
 	readonly flags: {
@@ -59,6 +69,59 @@ export function resolveMode(inputs: IdentityInputs): ExtensionMode {
 			workspaceId:
 				asString(inputs.flags.workspace) ?? asString(inputs.env.SCRAP_WORKSPACE_ID),
 			project: asString(inputs.env.SCRAP_PROJECT),
+			token: asString(inputs.env.SCRAP_TOKEN),
+		},
+	};
+}
+
+/** Return the latest Scraps binding on the active Pi session branch. */
+export function restoreSessionBinding(entries: readonly unknown[]): SessionBinding | undefined {
+	let binding: SessionBinding | undefined;
+	for (const value of entries) {
+		if (typeof value !== "object" || value === null) continue;
+		const entry = value as { type?: unknown; customType?: unknown; data?: unknown };
+		if (entry.type !== "custom" || entry.customType !== SESSION_BINDING_ENTRY) continue;
+		if (typeof entry.data !== "object" || entry.data === null) continue;
+		const data = entry.data as Partial<SessionBinding>;
+		if (data.version !== 1 || (data.mode !== "local" && data.mode !== "remote")) continue;
+		binding = {
+			version: 1,
+			mode: data.mode,
+			...(typeof data.daemonUrl === "string" ? { daemonUrl: data.daemonUrl } : {}),
+			...(typeof data.workspaceId === "string" ? { workspaceId: data.workspaceId } : {}),
+			...(typeof data.project === "string" ? { project: data.project } : {}),
+		};
+	}
+	return binding;
+}
+
+/**
+ * Resolve startup identity, allowing an explicit --scrap invocation to win
+ * while filling its workspace from the persisted session association.
+ */
+export function resolveSessionMode(
+	inputs: IdentityInputs,
+	binding: SessionBinding | undefined,
+): ExtensionMode {
+	const cli = resolveMode(inputs);
+	if (cli.kind === "remote") {
+		return {
+			kind: "remote",
+			config: {
+				...cli.config,
+				workspaceId: cli.config.workspaceId ?? (binding?.mode === "remote" ? binding.workspaceId : undefined),
+				project: cli.config.project ?? (binding?.mode === "remote" ? binding.project : undefined),
+			},
+		};
+	}
+	if (binding?.mode !== "remote") return { kind: "local" };
+	return {
+		kind: "remote",
+		config: {
+			daemonUrl: binding.daemonUrl ?? asString(inputs.env.SCRAP_DAEMON_URL) ?? DEFAULT_DAEMON_URL,
+			workspaceId: binding.workspaceId,
+			project: binding.project,
+			// Credentials are deliberately re-resolved, never persisted in Pi sessions.
 			token: asString(inputs.env.SCRAP_TOKEN),
 		},
 	};

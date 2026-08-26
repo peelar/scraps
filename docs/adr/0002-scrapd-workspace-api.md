@@ -179,9 +179,9 @@ explicit client support.
   against this API, and registers a remote-backed `grep` tool (Pi's grep tool
   spawns local ripgrep, so it cannot be redirected through operations and is
   reimplemented with matching output format).
-- `scrap pi` starts Pi with `--no-builtin-tools` so a failed extension load
-  leaves the session with no filesystem tools at all — fail closed per
-  ADR 0001.
+- Ordinary Pi starts locally. `/scrap` synchronously replaces all seven
+  project-facing tools before workspace acquisition; acquisition failure leaves
+  those overrides disconnected and fail-closed per ADR 0001.
 - Aborting a running command is one HTTP connection close; no separate cancel
   endpoint is needed in M1.
 - The API is intentionally transport-agnostic about where scrapd runs: moving

@@ -24,11 +24,15 @@ function remoteConfig(overrides: Partial<RemoteConfig> = {}): RemoteConfig {
 
 type FakeMethods = {
 	getWorkspace?: (id: string) => Promise<WorkspaceRecord>;
+	info?: () => Promise<{ name: string; version: string; provider?: string }>;
 };
 
 /** A ScrapdClient double exposing only the routes a test needs. */
 function fakeClient(methods: FakeMethods): ScrapdClient {
-	return Object.assign(Object.create(ScrapdClient.prototype), methods) as ScrapdClient;
+	return Object.assign(Object.create(ScrapdClient.prototype), {
+		info: async () => ({ name: "scrapd", version: "test", provider: "docker" }),
+		...methods,
+	}) as ScrapdClient;
 }
 
 describe("WorkspaceSession (fail-closed)", () => {
@@ -48,7 +52,7 @@ describe("WorkspaceSession (fail-closed)", () => {
 		const session = new WorkspaceSession();
 		assert.equal(session.remoteMode, false);
 		assert.equal(statusText(session), undefined);
-		assert.ok(describeSession(session).includes("--scrap not given"));
+		assert.ok(describeSession(session).includes("project tools are local"));
 		assert.throws(() => session.requireWorkspace(), ScrapsUnavailableError);
 	});
 });
@@ -80,7 +84,8 @@ describe("WorkspaceSession connection", () => {
 		assert.equal(connected.id, "quiet-river");
 		assert.equal(session.connection.status, "connected");
 		assert.equal(session.root, "/workspace");
-		assert.equal(statusText(session), "scrap:quiet-river");
+		assert.equal(statusText(session), "scrap:docker:quiet-river:running");
+		assert.ok(describeSession(session).includes("Provider: docker"));
 		assert.ok(describeSession(session).includes("Remote root: /workspace"));
 	});
 
@@ -119,5 +124,18 @@ describe("WorkspaceSession connection", () => {
 		const session = new WorkspaceSession();
 		session.configure(remoteConfig({ workspaceId: undefined }));
 		await assert.rejects(() => session.connect(), ScrapsUnavailableError);
+	});
+
+	it("returns to local mode only after explicit deactivation", async () => {
+		const client = fakeClient({ getWorkspace: async () => record });
+		const session = new WorkspaceSession(() => client);
+		session.configure(remoteConfig());
+		await session.connect();
+
+		session.deactivate();
+
+		assert.equal(session.remoteMode, false);
+		assert.equal(session.connectedWorkspace, undefined);
+		assert.equal(statusText(session), undefined);
 	});
 });

@@ -15,7 +15,12 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 import { registerScrapCommands } from "./commands.ts";
-import { resolveMode } from "./identity.ts";
+import {
+	SESSION_BINDING_ENTRY,
+	resolveSessionMode,
+	restoreSessionBinding,
+	type SessionBinding,
+} from "./identity.ts";
 import { createRemoteBashOps } from "./operations.ts";
 import { adaptSystemPrompt } from "./prompt.ts";
 import { statusText } from "./workspace.ts";
@@ -52,17 +57,25 @@ export default function scrapsExtension(pi: ExtensionAPI): void {
 		}
 	};
 
-	registerScrapCommands(pi, session, refreshStatus, activateRemote);
+	const persistBinding = (binding: SessionBinding) => {
+		pi.appendEntry(SESSION_BINDING_ENTRY, binding);
+	};
+
+	registerScrapCommands(pi, session, refreshStatus, activateRemote, persistBinding);
 
 	pi.on("session_start", async (_event, ctx) => {
 		// CLI flags are not available during the factory; resolve identity now.
-		const mode = resolveMode({
-			flags: {
-				scrap: pi.getFlag("scrap"),
-				workspace: pi.getFlag("workspace"),
+		const binding = restoreSessionBinding(ctx.sessionManager.getBranch());
+		const mode = resolveSessionMode(
+			{
+				flags: {
+					scrap: pi.getFlag("scrap"),
+					workspace: pi.getFlag("workspace"),
+				},
+				env: process.env,
 			},
-			env: process.env,
-		});
+			binding,
+		);
 
 		if (mode.kind === "local") {
 			ctx.ui.setStatus(STATUS_KEY, undefined);

@@ -128,7 +128,7 @@ export class ScrapdClient {
 		this.token = token;
 	}
 
-	async info(): Promise<{ name: string; version: string }> {
+	async info(): Promise<{ name: string; version: string; provider?: string }> {
 		return this.json("GET", "/v1/info");
 	}
 
