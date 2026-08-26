@@ -53,6 +53,23 @@ pi --scrap --workspace <workspace>
 launcher that resolves or creates a workspace and starts local Pi with the
 Scraps extension and workspace identity. It is not a separate agent runtime.
 
+### Local personalization is a product requirement
+
+Scraps will deliberately preserve the user's local Pi personalization layer:
+global skills, prompts, model/provider configuration, credentials, themes, and
+session history remain available in `scrap pi`. Losing this layer is a common
+weakness of cloud agents and would undermine the benefit of running Pi locally.
+Skills and prompts are treated as instructions for the agent, while repository
+state and project-affecting execution remain in the workspace.
+
+This does not imply that every globally installed executable extension is part
+of the trusted Scraps surface. Pi extensions run with local user permissions
+and may register locally backed tools. Scraps must document that trust boundary
+and eventually offer an extension policy that preserves skills and benign UI
+customization while preventing unreviewed extensions from bypassing the remote
+tool boundary. The default experience should retain personalization rather
+than silently starting with an empty Pi profile.
+
 The extension will:
 
 - replace all seven project-facing Pi tools: `bash`, `read`, `write`, `edit`,
@@ -92,8 +109,8 @@ will be added separately.
 
 ### Positive
 
-- Developers retain Pi's normal local TUI, configuration, authentication, model
-  providers, and session experience.
+- Developers retain Pi's normal local TUI, skills, prompts, configuration,
+  authentication, model providers, themes, and session experience.
 - LLM provider credentials do not need to enter workspace VMs.
 - Scraps integrates through Pi's public extension surface instead of building a
   terminal transport or maintaining Pi inside every workspace image.
@@ -122,6 +139,10 @@ will be added separately.
   be minimal and visible.
 - A partially initialized or disconnected extension must not expose local tools
   under remote tool names.
+- Skills and prompts may remain local because they are agent instructions, not
+  workspace execution. Global executable extensions are a separate trust
+  boundary: they can run with host permissions and must not be assumed safe
+  merely because the seven built-in tools were disabled.
 
 ## Alternatives considered
 
@@ -154,6 +175,9 @@ explicit Git, diff, artifact, or sync operations.
 4. Replace the seven built-in Pi tools behind an explicit `--scrap` flag.
 5. Add remote-state UI, system-prompt context, and disconnect tests.
 6. Implement `scrap pi` as the convenience launcher.
+7. Define and implement a Pi resource policy that explicitly preserves global
+   skills/prompts while auditing or restricting executable extensions capable
+   of adding host-backed project tools.
 
 ## References
 

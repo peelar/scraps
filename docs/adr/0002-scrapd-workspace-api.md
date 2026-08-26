@@ -31,12 +31,18 @@ directory. This provider has no isolation; VM isolation arrives in M4.
 
   Codes: `unauthorized` (401), `invalid_request` (400), `invalid_path` (400),
   `not_found` (404), `workspace_not_available` (409), `internal` (500).
-- File paths in requests and responses are **absolute paths in the workspace
-  host's filesystem**. The extension learns the workspace `rootPath` from the
-  daemon and creates Pi tools with that path space, so tool output (`pwd`,
-  error messages, search results) shows real paths. Paths must resolve inside
-  the workspace root after cleaning and symlink evaluation; anything else is
-  `invalid_path`.
+- For the M1 directory provider, file paths in requests and responses are
+  **absolute paths in the workspace host's filesystem**. The extension learns
+  the workspace `rootPath` from the daemon and creates Pi tools with that path
+  space, so tool output (`pwd`, error messages, search results) shows real
+  paths. Paths must resolve inside the workspace root after cleaning and
+  symlink evaluation; anything else is `invalid_path`.
+- This path representation is explicitly transitional. Container and VM
+  providers must not expose implementation-specific host paths. Before adding
+  the first sandbox provider, the API will move to workspace-relative request
+  paths and a stable agent-visible virtual root (normally `/workspace`). This
+  requires a versioned compatibility change rather than silently changing M1
+  semantics.
 
 ### Workspace resource
 
@@ -161,3 +167,8 @@ All take `{path, ...}` with absolute validated paths:
 1. `.gitignore`-aware search (M2, likely via ripgrep on the host).
 2. exec environment policy and credential brokering (M2/M3).
 3. Workspace stop/start/sleep lifecycle states (M4/M6).
+4. Version the path contract for sandbox providers: workspace-relative API
+   paths with stable `/workspace` display paths, independent of host/container
+   filesystem layout.
+5. Move lifecycle, exec, and filesystem operations behind a provider interface
+   before introducing Docker and Proxmox VM providers (ADR 0003).
