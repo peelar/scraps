@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -30,6 +31,9 @@ func New(baseURL, token string) *Client {
 		http:    &http.Client{Timeout: 15 * time.Minute},
 	}
 }
+
+// BaseURL returns the daemon URL used for browser callbacks.
+func (c *Client) BaseURL() string { return c.baseURL }
 
 // Error is a structured API error response.
 type Error struct {
@@ -119,6 +123,44 @@ func (c *Client) Info(ctx context.Context) (InfoResponse, error) {
 	var info InfoResponse
 	err := c.do(ctx, http.MethodGet, "/v1/info", nil, &info)
 	return info, err
+}
+
+// GitHubAuthStart is a newly-created browser authorization flow.
+type GitHubAuthStart struct {
+	State      string `json:"state"`
+	BrowserURL string `json:"browserUrl"`
+}
+
+// GitHubAuthStatus reports progress of the GitHub App installation.
+type GitHubAuthStatus struct {
+	State string `json:"state"`
+	Error string `json:"error,omitempty"`
+	App   string `json:"app,omitempty"`
+}
+
+// StartGitHubAuth creates a GitHub App manifest and installation flow.
+func (c *Client) StartGitHubAuth(ctx context.Context) (GitHubAuthStart, error) {
+	var started GitHubAuthStart
+	// GitHub's App Manifest validator rejects numeric loopback hosts even though
+	// they are valid URLs. The Lima forward is also reachable through localhost.
+	callbackURL := c.baseURL
+	if parsed, err := url.Parse(callbackURL); err == nil && (parsed.Hostname() == "127.0.0.1" || parsed.Hostname() == "::1") {
+		port := parsed.Port()
+		parsed.Host = "localhost"
+		if port != "" {
+			parsed.Host += ":" + port
+		}
+		callbackURL = parsed.String()
+	}
+	err := c.do(ctx, http.MethodPost, "/v1/auth/github/start", map[string]string{"callbackUrl": callbackURL}, &started)
+	return started, err
+}
+
+// GitHubAuthStatus fetches browser authorization progress.
+func (c *Client) GitHubAuthStatus(ctx context.Context, state string) (GitHubAuthStatus, error) {
+	var status GitHubAuthStatus
+	err := c.do(ctx, http.MethodGet, "/v1/auth/github/status/"+url.PathEscape(state), nil, &status)
+	return status, err
 }
 
 // CreateWorkspace creates a workspace, cloning repoURL when given.

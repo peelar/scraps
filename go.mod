@@ -2,10 +2,7 @@ module github.com/peelar/scraps
 
 go 1.25.0
 
-require (
-	golang.org/x/term v0.38.0
-	modernc.org/sqlite v1.57.0
-)
+require modernc.org/sqlite v1.57.0
 
 require (
 	github.com/dustin/go-humanize v1.0.1 // indirect

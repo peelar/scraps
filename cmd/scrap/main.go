@@ -19,7 +19,7 @@ Commands:
   rm <id>...    Remove workspaces
   status        Show daemon and workspace status
   configure     Configure local worker VM sizing
-  auth github   Configure a brokered GitHub push credential
+  auth github   Grant repositories to a self-hosted GitHub App
   version       Print version information
 
 Environment:

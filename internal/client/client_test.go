@@ -72,6 +72,28 @@ func TestPingAndLifecycle(t *testing.T) {
 	}
 }
 
+func TestGitHubAuthUsesGitHubCompatibleLoopbackURL(t *testing.T) {
+	var callbackURL string
+	apiServer := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		var body struct {
+			CallbackURL string `json:"callbackUrl"`
+		}
+		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		callbackURL = body.CallbackURL
+		response.Header().Set("Content-Type", "application/json")
+		_, _ = response.Write([]byte(`{"state":"flow","browserUrl":"https://example.test"}`))
+	}))
+	defer apiServer.Close()
+	if _, err := New(apiServer.URL, "").StartGitHubAuth(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(callbackURL, "127.0.0.1") || !strings.Contains(callbackURL, "localhost:") {
+		t.Fatalf("callback URL = %q", callbackURL)
+	}
+}
+
 func TestTokenRequired(t *testing.T) {
 	apiServer, err := server.New(server.Config{DataDir: t.TempDir(), Token: "secret"})
 	if err != nil {

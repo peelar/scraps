@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/peelar/scraps/internal/githubapp"
 	"github.com/peelar/scraps/internal/provider"
 	"github.com/peelar/scraps/internal/store"
 	"github.com/peelar/scraps/internal/version"
@@ -40,6 +41,7 @@ type Server struct {
 	started  time.Time
 	shutdown func()
 	pool     *readyPool
+	github   *githubapp.Manager
 }
 
 // New opens the store under the data dir and builds the HTTP handler.
@@ -66,12 +68,18 @@ func New(config Config) (*Server, error) {
 		shutdown = func() { st.Close() }
 	}
 
+	github, err := githubapp.New(config.DataDir)
+	if err != nil {
+		shutdown()
+		return nil, err
+	}
 	server := &Server{
 		provider: runtime,
 		token:    config.Token,
 		dataDir:  config.DataDir,
 		started:  time.Now(),
 		shutdown: shutdown,
+		github:   github,
 	}
 	server.pool = newReadyPool(runtime)
 	server.handler = server.routes()
@@ -81,6 +89,7 @@ func New(config Config) (*Server, error) {
 // Close releases server resources.
 func (s *Server) Close() {
 	s.pool.close()
+	s.github.Close()
 	s.shutdown()
 }
 
@@ -91,6 +100,13 @@ func (s *Server) routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", health)
 	mux.HandleFunc("GET /v1/info", s.requireAuth(info(s)))
+	mux.HandleFunc("POST /v1/auth/github/start", s.requireAuth(s.startGitHubAuth))
+	mux.HandleFunc("GET /v1/auth/github/status/{state}", s.requireAuth(s.githubAuthStatus))
+	// GitHub opens these callback routes in the user's browser. Their random,
+	// short-lived state value is the authorization capability.
+	mux.HandleFunc("GET /v1/auth/github/manifest", s.githubManifest)
+	mux.HandleFunc("GET /v1/auth/github/manifest/callback", s.githubManifestCallback)
+	mux.HandleFunc("GET /v1/auth/github/install/callback/{key}", s.githubInstallCallback)
 
 	mux.HandleFunc("POST /v1/workspaces", s.requireAuth(s.createWorkspace))
 	mux.HandleFunc("GET /v1/workspaces", s.requireAuth(s.listWorkspaces))

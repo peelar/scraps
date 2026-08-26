@@ -42,7 +42,11 @@ Scraps does not run workspace processes directly on the developer host.
 
 `/scrap [project]` creates a workspace, switches all project-facing tools to
 it, and fails closed if the daemon cannot be reached. Attach to an existing
-workspace with `/scrap-select ID`.
+workspace with `/scrap-select ID`. `/scrap toss` permanently deletes the
+attached workspace and returns tools and `!`/`!!` to the local computer. The
+workspace association is stored in the Pi session, so `/resume` reconnects to
+the same workspace unless it was tossed; a new Pi session starts locally until
+activated.
 
 Useful commands:
 
@@ -51,7 +55,7 @@ scrap ls                 # workspaces waiting for you
 scrap stop ID / start ID # pause and resume
 scrap rm ID              # sweep up
 scrap status             # check the daemon
-scrap auth github        # broker a fine-grained PAT for fetch/push
+scrap auth github        # grant selected repositories to a GitHub App
 make down                # stop the local worker VM
 ```
 
@@ -60,12 +64,12 @@ policy, credential providers, and resource controls while Scraps preserves the
 Pi tools and `/workspace` contract. The worker VM supplies the host-protection
 boundary; OpenShell containers supply economical per-workspace separation.
 
-For private repositories and pushes, create a fine-grained GitHub PAT limited
-to selected repositories with **Contents: read/write**, then run `scrap auth
-github`. Scraps sends it to the OpenShell gateway inside the worker VM without
-putting it in process arguments, attaches a push-only provider to workspaces,
-and leaves GitHub API mutations blocked. `--from-gh` imports the host `gh`
-credential; `--token-stdin` reads from a password manager or pipe.
+For private repositories and pushes, run `scrap auth github`. Scraps creates a
+private self-hosted GitHub App and opens GitHub's repository picker. Its App key
+stays in the worker control plane; one-hour installation credentials are minted
+and refreshed automatically, brokered through OpenShell, and never exposed to
+sandbox processes. The attached provider permits Git fetch/push while GitHub
+API mutations, workflow dispatch, and repository administration stay blocked.
 
 ## Where it is today
 
