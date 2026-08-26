@@ -40,13 +40,10 @@ scrap down               # lights out
 ## Docker workspaces
 
 Directory workspaces remain the trusted-development default. For an isolated
-Linux workspace, build the pinned image and select Docker before starting the
-daemon:
+Linux workspace, build the pinned image and switch providers in one command:
 
 ```bash
-make down
-make docker-image
-SCRAPD_PROVIDER=docker make up
+make docker-up
 ```
 
 Override the image with `SCRAPD_DOCKER_IMAGE`. Docker Engine, Docker Desktop,
