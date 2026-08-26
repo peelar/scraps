@@ -25,12 +25,14 @@ function remoteConfig(overrides: Partial<RemoteConfig> = {}): RemoteConfig {
 type FakeMethods = {
 	getWorkspace?: (id: string) => Promise<WorkspaceRecord>;
 	info?: () => Promise<{ name: string; version: string; provider?: string }>;
+	ports?: (id: string) => Promise<number[]>;
 };
 
 /** A ScrapdClient double exposing only the routes a test needs. */
 function fakeClient(methods: FakeMethods): ScrapdClient {
 	return Object.assign(Object.create(ScrapdClient.prototype), {
 		info: async () => ({ name: "scrapd", version: "test", provider: "docker" }),
+		ports: async () => [] as number[],
 		...methods,
 	}) as ScrapdClient;
 }
@@ -137,5 +139,82 @@ describe("WorkspaceSession connection", () => {
 		assert.equal(session.remoteMode, false);
 		assert.equal(session.connectedWorkspace, undefined);
 		assert.equal(statusText(session), undefined);
+	});
+});
+
+describe("WorkspaceSession port hints", () => {
+	const record: WorkspaceRecord = {
+		id: "quiet-river",
+		project: "owner/project",
+		state: "running",
+		rootPath: "/workspace",
+		pathContract: "workspace-relative-v1",
+	};
+
+	function connectedSession(ports: number[]) {
+		const client = fakeClient({
+			getWorkspace: async () => record,
+			ports: async () => [...ports],
+		});
+		const session = new WorkspaceSession(() => client);
+		session.configure(remoteConfig());
+		return { session, apply: (next: number[]) => void (ports = next) };
+	}
+
+	it("notifies once for newly listening ports and prunes gone ones", async () => {
+		const { session, apply } = connectedSession([]);
+		await session.connect();
+		const notified: number[][] = [];
+		session.setPortsListener((ports) => notified.push(ports));
+
+		apply([5173]);
+		await session.refreshPorts();
+		apply([5173]);
+		await session.refreshPorts();
+		assert.deepEqual(notified, [[5173]]);
+
+		// A second port appears: only the newcomer is reported.
+		apply([3000, 5173]);
+		await session.refreshPorts();
+		assert.deepEqual(notified, [[5173], [3000]]);
+
+		// The server stops and restarts: the port is new again.
+		apply([]);
+		await session.refreshPorts();
+		apply([5173]);
+		await session.refreshPorts();
+		assert.deepEqual(notified, [[5173], [3000], [5173]]);
+	});
+
+	it("seeds ports on connect without notifying", async () => {
+		const { session } = connectedSession([5173]);
+		const notified: number[][] = [];
+		await session.connect();
+		session.setPortsListener((ports) => notified.push(ports));
+		await session.refreshPorts();
+		assert.deepEqual(notified, []);
+		assert.deepEqual(session.listeningPorts, [5173]);
+		assert.ok(statusText(session)?.includes(":5173"));
+	});
+
+	it("shows no ports in the status line when nothing listens", async () => {
+		const { session } = connectedSession([]);
+		await session.connect();
+		assert.equal(statusText(session), "scrap:docker:quiet-river:running");
+	});
+
+	it("swallows port discovery failures", async () => {
+		const { session } = connectedSession([]);
+		await session.connect();
+		const client = fakeClient({
+			getWorkspace: async () => record,
+			ports: async () => {
+				throw new Error("daemon unreachable");
+			},
+		});
+		// Private field access: replace the wired client for this assertion.
+		session["client"] = client;
+		await session.refreshPorts();
+		assert.deepEqual(session.listeningPorts, []);
 	});
 });

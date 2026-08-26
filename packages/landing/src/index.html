@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#0b0c0a" />
+    <meta name="description" content="Turn a spare computer into private, disposable workspaces for Pi." />
+    <meta property="og:title" content="Scraps — your private agent cloud" />
+    <meta property="og:description" content="Turn your idle compute into a private agent cloud." />
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://scraps-landing.vercel.app/" />
+    <meta property="og:image" content="https://scraps-landing.vercel.app/og.png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt" content="Scraps — Turn your idle compute into a private agent cloud." />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Scraps — your private agent cloud" />
+    <meta name="twitter:description" content="Turn your idle compute into a private agent cloud." />
+    <meta name="twitter:image" content="https://scraps-landing.vercel.app/og.png" />
+    <title>Scraps — turn idle compute into a private agent cloud</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <header>
+      <a class="wordmark" href="#top">scraps<span>.</span></a>
+      <a href="https://github.com/peelar/scraps">GitHub ↗</a>
+    </header>
+
+    <main id="top">
+      <section class="hero" aria-labelledby="title">
+        <p class="label">Scraps / self-hosted agent compute</p>
+        <h1 id="title">Turn your idle compute into a private agent cloud.</h1>
+        <p class="summary">Scraps gives Pi disposable development computers on hardware you control. Pi stays local. Project files, commands, builds, and tests run on the spare machine.</p>
+      </section>
+
+      <section id="install" aria-labelledby="install-title">
+        <p class="label">01 / Install it on a spare computer</p>
+        <h2 id="install-title">Start with an ordinary Linux VM.</h2>
+        <p>The VM can live on a Proxmox server, a spare computer, or your current machine. Scraps installs <code>scrapd</code>, OpenShell, and the workspace runtime inside it. The host is never used as the workspace.</p>
+
+        <h3>On your current computer</h3>
+        <p>Lima creates the worker VM for you.</p>
+        <pre><code>pnpm install
+make configure
+make up</code></pre>
+
+        <h3>On a spare computer or Proxmox host</h3>
+        <p>Create an Ubuntu 24.04 VM, join it to your Tailscale network, then deploy the worker from your Scraps checkout.</p>
+        <pre><code>make deploy-worker REMOTE=you@worker
+ssh you@worker sudo scraps-worker tailscale-serve
+make configure-remote-client REMOTE=you@worker
+scrap status</code></pre>
+
+        <p class="note">One worker VM can hold many isolated, disposable OpenShell workspaces. The service stays on your private network.</p>
+        <a class="text-link" href="https://github.com/peelar/scraps/blob/main/docs/homelab-nuc.md">Proxmox setup and security notes ↗</a>
+      </section>
+
+      <section id="use" aria-labelledby="use-title">
+        <p class="label">02 / Use it from Pi</p>
+        <h2 id="use-title">Open Pi. Ask for a computer.</h2>
+        <p>Pi starts normally on your computer. Run <code>/scrap</code> when you want the project to move into a remote workspace.</p>
+        <pre><code>$ pi
+› /scrap
+✓ workspace ws_7f2d attached
+
+› run the tests and fix what fails</code></pre>
+
+        <p>Scraps replaces Pi’s project-facing tools with remote versions. <code>bash</code>, <code>read</code>, <code>write</code>, <code>edit</code>, <code>ls</code>, <code>find</code>, and <code>grep</code> now operate inside the workspace.</p>
+
+        <dl>
+          <div>
+            <dt>Stays local</dt>
+            <dd>Pi, models, provider setup, prompts, skills, sessions, and the terminal UI.</dd>
+          </div>
+          <div>
+            <dt>Runs remotely</dt>
+            <dd>Project files, shell commands, dependency installs, builds, and tests.</dd>
+          </div>
+        </dl>
+
+        <p>When you are finished, toss the workspace. Pi’s tools return to your local computer.</p>
+        <pre><code>› /scrap toss
+✓ workspace deleted; local tools restored</code></pre>
+
+        <div class="end">
+          <p><strong>Scraps is an early prototype.</strong> It currently supports Pi, one Linux worker VM, and OpenShell workspaces.</p>
+          <a href="https://github.com/peelar/scraps#try-it">Build it from source ↗</a>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      <span>Scraps</span>
+      <span>Open source / 2026</span>
+    </footer>
+  </body>
+</html>

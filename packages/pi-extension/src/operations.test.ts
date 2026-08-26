@@ -4,6 +4,7 @@ import { describe, it } from "node:test";
 import { createEditTool, createLsTool } from "@earendil-works/pi-coding-agent";
 
 import {
+	type ExecOptions,
 	type GrepResult,
 	type WorkspaceRecord,
 	type FileStat,
@@ -13,6 +14,7 @@ import { ScrapsUnavailableError } from "./errors.ts";
 import { type RemoteConfig } from "./identity.ts";
 import * as operations from "./operations.ts";
 import {
+	createRemoteBashOps,
 	createRemoteEditOps,
 	createRemoteLsOps,
 	relativeToRoot,
@@ -29,10 +31,12 @@ function makeFakeClient(): {
 	files: Map<string, Buffer>;
 	statResults: Map<string, FileStat>;
 	grepResult: GrepResult;
+	execCalls: ExecOptions[];
 } {
 	const files = new Map<string, Buffer>();
 	const statResults = new Map<string, FileStat>();
 	let grepResult: GrepResult = { matches: [], limitReached: false };
+	const execCalls: ExecOptions[] = [];
 
 	const record: WorkspaceRecord = {
 		id: "quiet-river",
@@ -69,12 +73,22 @@ function makeFakeClient(): {
 		},
 		readdir: async () => ["src", "package.json"],
 		grep: async () => grepResult,
+		exec: async (
+			_id: string,
+			_command: string,
+			_cwd: string,
+			options: ExecOptions,
+		) => {
+			execCalls.push(options);
+			return { exitCode: 0 };
+		},
 	}) as unknown as ScrapdClient;
 
 	return {
 		client,
 		files,
 		statResults,
+		execCalls,
 		get grepResult() {
 			return grepResult;
 		},
@@ -83,6 +97,35 @@ function makeFakeClient(): {
 		},
 	};
 }
+
+describe("remote bash environment boundary", () => {
+	it("forwards only the separately approved environment", async () => {
+		const fake = makeFakeClient();
+		const session = makeSession(fake.client);
+		await session.connect();
+		const ops = createRemoteBashOps(session, {
+			DATABASE_URL: "postgres://sentinel-approved",
+		});
+
+		await ops.exec("env", "/workspace", {
+			onData: () => {},
+			env: {
+				AWS_SECRET_ACCESS_KEY: "sentinel-aws",
+				NPM_TOKEN: "sentinel-npm",
+				OPENAI_API_KEY: "sentinel-openai",
+				SCRAP_TOKEN: "sentinel-scrap",
+				SSH_AUTH_SOCK: "/tmp/sentinel-agent.sock",
+				UNRELATED_SECRET: "sentinel-unrelated",
+			},
+		});
+
+		assert.equal(fake.execCalls.length, 1);
+		assert.deepEqual(fake.execCalls[0]?.env, {
+			DATABASE_URL: "postgres://sentinel-approved",
+		});
+		assert.equal("UNRELATED_SECRET" in (fake.execCalls[0]?.env ?? {}), false);
+	});
+});
 
 function makeSession(client: ScrapdClient): WorkspaceSession {
 	const config: RemoteConfig = {

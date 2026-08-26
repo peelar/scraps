@@ -1,0 +1,158 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ENV_FILE=/etc/scraps/scrapd.env
+BACKUP_ROOT=/var/backups/scraps
+usage() { echo "usage: scraps-worker <diagnostics|healthcheck|enable-backups [DIR]|backup [DIR]|restore ARCHIVE|upgrade BUNDLE|rollback|tailscale-enroll|tailscale-serve|rotate-token>"; }
+need_root() { [[ $EUID -eq 0 ]] || { echo "this command requires root" >&2; exit 1; }; }
+user_systemctl() {
+  local uid
+  uid=$(id -u scraps)
+  runuser -u scraps -- env XDG_RUNTIME_DIR="/run/user/$uid" systemctl --user "$@"
+}
+start_stack() {
+  systemctl start docker.socket docker.service
+  user_systemctl start openshell-gateway.service
+  timeout 30 bash -c 'until ss -lnt | grep -q "127.0.0.1:17670"; do sleep 1; done'
+  systemctl start scrapd.service
+}
+
+case "${1:-}" in
+  diagnostics)
+    systemctl --no-pager --full status docker.service scrapd.service || true
+    journalctl -u scrapd.service -n 100 --no-pager || true
+    docker info --format 'Docker {{.ServerVersion}}: {{.Containers}} containers, {{.Images}} images' || true
+    runuser -u scraps -- env HOME=/home/scraps PATH=/opt/scraps/current/bin:/home/scraps/.local/bin:/usr/local/bin:/usr/bin:/bin openshell status || true
+    curl -fsS http://127.0.0.1:8484/healthz && echo
+    sqlite3 /var/lib/scraps/scrapd/scrapd.db 'PRAGMA quick_check;' || true
+    df -h / /var/lib/scraps /var/lib/docker
+    du -sh /var/lib/scraps /var/lib/docker 2>/dev/null || true
+    ;;
+  healthcheck)
+    need_root
+    health_config=/etc/scraps/health.env
+    [[ ! -r $health_config ]] || source "$health_config"
+    [[ ! -r /etc/scraps/backup.env ]] || source /etc/scraps/backup.env
+    disk_limit=${SCRAPS_DISK_WARN_PERCENT:-80}
+    restart_limit=${SCRAPS_RESTART_WARN_COUNT:-3}
+    backup_hours=${SCRAPS_BACKUP_MAX_AGE_HOURS:-36}
+    issues=()
+    systemctl is-active --quiet docker.service || issues+=("Docker is not active")
+    systemctl is-active --quiet scrapd.service || issues+=("scrapd is not active")
+    user_systemctl is-active --quiet openshell-gateway.service || issues+=("OpenShell gateway is not active")
+    curl -fsS --max-time 5 http://127.0.0.1:8484/healthz >/dev/null || issues+=("scrapd health check failed")
+    disk_used=$(df --output=pcent /var/lib/docker | tail -1 | tr -dc '0-9')
+    [[ $disk_used =~ ^[0-9]+$ ]] || issues+=("Docker disk utilization could not be read")
+    if [[ $disk_used =~ ^[0-9]+$ && $disk_used -ge $disk_limit ]]; then issues+=("Docker disk utilization is ${disk_used}%"); fi
+    restarts=$(systemctl show scrapd.service --property=NRestarts --value)
+    [[ $restarts =~ ^[0-9]+$ ]] || issues+=("scrapd restart count could not be read")
+    if [[ $restarts =~ ^[0-9]+$ && $restarts -ge $restart_limit ]]; then issues+=("scrapd has restarted $restarts times"); fi
+    backup_dir=${SCRAPS_BACKUP_ROOT:-$BACKUP_ROOT}
+    latest_backup=$(find "$backup_dir" -maxdepth 1 -type f -name '*.tar.gz.age' -printf '%T@\n' 2>/dev/null | sort -nr | head -1)
+    if [[ -z $latest_backup ]]; then
+      issues+=("no encrypted application backup exists")
+    else
+      backup_age_hours=$(( ($(date +%s) - ${latest_backup%.*}) / 3600 ))
+      if (( backup_age_hours > backup_hours )); then issues+=("latest backup is ${backup_age_hours}h old"); fi
+    fi
+    if (( ${#issues[@]} == 0 )); then echo "Scraps worker health: ok"; exit 0; fi
+    message="Scraps worker alert: $(IFS='; '; echo "${issues[*]}")"
+    echo "$message" >&2
+    if [[ -n ${SCRAPS_ALERT_WEBHOOK:-} ]]; then
+      escaped=${message//\\/\\\\}; escaped=${escaped//\"/\\\"}
+      printf 'url = "%s"\nheader = "Content-Type: application/json"\ndata = "{\\"text\\":\\"%s\\"}"\n' \
+        "$SCRAPS_ALERT_WEBHOOK" "$escaped" | curl --fail --silent --show-error --config - >/dev/null || true
+    fi
+    exit 1
+    ;;
+  enable-backups)
+    need_root
+    recipient=${SCRAPS_BACKUP_AGE_RECIPIENT:?set SCRAPS_BACKUP_AGE_RECIPIENT to the age public recipient}
+    dest=${2:-$BACKUP_ROOT}
+    backup_config=$(mktemp /etc/scraps/backup.env.XXXXXX)
+    printf 'SCRAPS_BACKUP_AGE_RECIPIENT=%s\nSCRAPS_BACKUP_ROOT=%s\n' "$recipient" "$dest" >"$backup_config"
+    chown root:root "$backup_config"; chmod 0600 "$backup_config"; mv "$backup_config" /etc/scraps/backup.env
+    install -d -m 0700 "$dest"
+    systemctl enable --now scraps-backup.timer
+    echo "Daily encrypted backups enabled to $dest"
+    ;;
+  backup)
+    need_root
+    [[ -n ${SCRAPS_BACKUP_AGE_RECIPIENT:-} ]] || {
+      echo "set SCRAPS_BACKUP_AGE_RECIPIENT; backups contain bearer and GitHub App secrets" >&2
+      exit 1
+    }
+    dest=${2:-${SCRAPS_BACKUP_ROOT:-$BACKUP_ROOT}}; install -d -m 0700 "$dest"
+    stamp=$(date -u +%Y%m%dT%H%M%SZ); archive="$dest/scraps-$stamp.tar.gz.age"
+    systemctl stop scrapd.service
+    user_systemctl stop openshell-gateway.service || true
+    systemctl stop docker.service docker.socket
+    trap start_stack EXIT
+    tar -cz /var/lib/scraps /var/lib/docker /etc/scraps \
+      /home/scraps/.config/openshell /home/scraps/.local/state/openshell | \
+      age --recipient "$SCRAPS_BACKUP_AGE_RECIPIENT" --output "$archive"
+    sha256sum "$archive" >"$archive.sha256"
+    echo "$archive"
+    ;;
+  restore)
+    need_root; archive=${2:?restore requires an archive}
+    identity=${SCRAPS_BACKUP_AGE_IDENTITY:?set SCRAPS_BACKUP_AGE_IDENTITY to the age identity file}
+    sha256sum -c "$archive.sha256"
+    systemctl stop scrapd.service; user_systemctl stop openshell-gateway.service || true
+    systemctl stop docker.service docker.socket
+    age --decrypt --identity "$identity" "$archive" | tar -xz -C /
+    chown -R scraps:scraps /var/lib/scraps /home/scraps/.config/openshell
+    start_stack
+    ;;
+  upgrade)
+    need_root; bundle=${2:?upgrade requires a bundle}; stage=$(mktemp -d); trap 'rm -rf -- "$stage"' EXIT
+    tar -xzf "$bundle" -C "$stage"; (cd "$stage" && sha256sum -c SHA256SUMS)
+    [[ $(cat "$stage/manifest.env" | sed -n 's/^SCRAPS_BUNDLE_FORMAT=//p') == 1 ]] || { echo "incompatible bundle format" >&2; exit 1; }
+    readlink -f /opt/scraps/current > /var/lib/scraps/previous-release
+    "$stage/install"
+    ;;
+  rollback)
+    need_root; previous=$(cat /var/lib/scraps/previous-release)
+    [[ -x "$previous/bin/scrapd" ]] || { echo "previous release is unavailable" >&2; exit 1; }
+    previous_version=$(cat "$previous/VERSION")
+    previous_repository=$(sed -n 's/^SCRAPS_WORKSPACE_IMAGE_REPOSITORY=//p' "$previous/manifest.env")
+    [[ -n $previous_version && -n $previous_repository ]] || { echo "previous release metadata is invalid" >&2; exit 1; }
+    rollback_env=$(mktemp /etc/scraps/scrapd.env.XXXXXX)
+    while IFS= read -r line; do
+      if [[ $line == SCRAPD_OPENSHELL_IMAGE=* ]]; then
+        printf 'SCRAPD_OPENSHELL_IMAGE=%s:%s\n' "$previous_repository" "$previous_version"
+      else
+        printf '%s\n' "$line"
+      fi
+    done <"$ENV_FILE" >"$rollback_env"
+    chown root:scraps "$rollback_env"; chmod 0640 "$rollback_env"; mv "$rollback_env" "$ENV_FILE"
+    ln -sfn "$previous" /opt/scraps/current; systemctl restart scrapd.service
+    ;;
+  tailscale-enroll)
+    need_root
+    [[ -n ${TAILSCALE_AUTHKEY:-} ]] || { echo "set a short-lived TAILSCALE_AUTHKEY in the environment" >&2; exit 1; }
+    if ! command -v tailscale >/dev/null; then
+      curl --proto '=https' --tlsv1.2 -fsSL https://tailscale.com/install.sh | sh
+    fi
+    key_file=$(mktemp /run/scraps-tailscale-key.XXXXXX)
+    trap 'rm -f -- "$key_file"' EXIT
+    chmod 0600 "$key_file"; printf '%s' "$TAILSCALE_AUTHKEY" >"$key_file"
+    tailscale up --auth-key="file:$key_file" --hostname="${SCRAPS_TAILSCALE_HOSTNAME:-scraps-worker}"
+    unset TAILSCALE_AUTHKEY
+    ;;
+  tailscale-serve)
+    need_root; command -v tailscale >/dev/null || { echo "install Tailscale first: https://tailscale.com/download/linux" >&2; exit 1; }
+    tailscale serve --bg http://127.0.0.1:8484
+    ;;
+  rotate-token)
+    need_root; token=$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')
+    new_env=$(mktemp /etc/scraps/scrapd.env.XXXXXX)
+    while IFS= read -r line; do
+      if [[ $line == SCRAPD_TOKEN=* ]]; then printf 'SCRAPD_TOKEN=%s\n' "$token"; else printf '%s\n' "$line"; fi
+    done <"$ENV_FILE" >"$new_env"
+    chown root:scraps "$new_env"; chmod 0640 "$new_env"; mv "$new_env" "$ENV_FILE"
+    systemctl restart scrapd.service
+    echo "New SCRAP_TOKEN (store it securely): $token"
+    ;;
+  *) usage >&2; exit 2 ;;
+esac

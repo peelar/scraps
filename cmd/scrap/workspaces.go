@@ -4,18 +4,18 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strconv"
+	"strings"
 	"text/tabwriter"
 	"time"
 
 	"github.com/peelar/scraps/internal/client"
+	"github.com/peelar/scraps/internal/workspace"
 )
 
 func newClientFromEnv() *client.Client {
-	url := os.Getenv("SCRAP_DAEMON_URL")
-	if url == "" {
-		url = "http://127.0.0.1:8484"
-	}
-	return client.New(url, os.Getenv("SCRAP_TOKEN"))
+	configured := resolvedClientConfig()
+	return client.New(configured.DaemonURL, configured.Token)
 }
 
 func runList(_ []string) int {
@@ -31,10 +31,10 @@ func runList(_ []string) int {
 	}
 
 	writer := tabwriter.NewWriter(os.Stdout, 2, 4, 2, ' ', 0)
-	fmt.Fprintln(writer, "ID\tSTATE\tPROJECT\tREPO\tCREATED")
+	fmt.Fprintln(writer, "ID\tSTATE\tPROJECT\tREPO\tPORTS\tCREATED")
 	for _, w := range workspaces {
-		fmt.Fprintf(writer, "%s\t%s\t%s\t%s\t%s\n",
-			w.ID, w.State, w.Project, w.RepoURL, w.CreatedAt.Local().Format(time.DateTime))
+		fmt.Fprintf(writer, "%s\t%s\t%s\t%s\t%s\t%s\n",
+			w.ID, w.State, w.Project, w.RepoURL, workspacePortsColumn(api, w), w.CreatedAt.Local().Format(time.DateTime))
 	}
 	if err := writer.Flush(); err != nil {
 		fmt.Fprintf(os.Stderr, "scrap: %v\n", err)
@@ -87,4 +87,26 @@ func runRemove(args []string) int {
 		return 1
 	}
 	return 0
+}
+
+// formatPortList renders listening ports as `:5173, :3000` for humans.
+func formatPortList(ports []client.PortInfo) string {
+	parts := make([]string, 0, len(ports))
+	for _, p := range ports {
+		parts = append(parts, ":"+strconv.Itoa(p.Port))
+	}
+	return strings.Join(parts, ", ")
+}
+
+// workspacePortsColumn reports a workspace's listening ports, or "-" when
+// none are known (stopped workspace or listing failure).
+func workspacePortsColumn(api *client.Client, w workspace.Workspace) string {
+	if w.State != "running" {
+		return "-"
+	}
+	ports, err := api.WorkspacePorts(context.Background(), w.ID)
+	if err != nil || len(ports) == 0 {
+		return "-"
+	}
+	return formatPortList(ports)
 }

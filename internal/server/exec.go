@@ -5,7 +5,10 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"regexp"
+	"strings"
 	"sync"
 	"time"
 
@@ -13,6 +16,19 @@ import (
 )
 
 const execTimeoutCap = time.Hour
+
+const (
+	maxExecEnvVariables = 64
+	maxExecEnvValueSize = 64 << 10
+	maxExecEnvTotalSize = 256 << 10
+)
+
+var execEnvNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+var reservedExecEnvironment = map[string]struct{}{
+	"HOME": {}, "PATH": {}, "SHELL": {}, "TMPDIR": {},
+	"SCRAP_WORKSPACE_ROOT": {}, "SCRAP_TOKEN": {}, "SCRAPS_CLIENT_CONFIG": {},
+}
 
 type execRequest struct {
 	Command   string            `json:"command"`
@@ -40,6 +56,10 @@ func (s *Server) execCommand(w http.ResponseWriter, r *http.Request) {
 	}
 	if b.Command == "" {
 		writeError(w, 400, "invalid_request", "command is required")
+		return
+	}
+	if err := validateExecEnvironment(b.Env); err != nil {
+		writeError(w, 400, "invalid_request", err.Error())
 		return
 	}
 	ctx := r.Context()
@@ -73,6 +93,35 @@ func (s *Server) execCommand(w http.ResponseWriter, r *http.Request) {
 			writer.event(execEvent{Type: "error", Reason: err.Error()})
 		}
 	}
+}
+
+func validateExecEnvironment(env map[string]string) error {
+	if len(env) > maxExecEnvVariables {
+		return fmt.Errorf("environment has %d variables; maximum is %d", len(env), maxExecEnvVariables)
+	}
+	total := 0
+	for name, value := range env {
+		if !execEnvNamePattern.MatchString(name) {
+			return fmt.Errorf("invalid environment variable name %q", name)
+		}
+		if _, reserved := reservedExecEnvironment[name]; reserved || strings.HasPrefix(name, "OPENSHELL_") {
+			return fmt.Errorf("environment variable %q is reserved by Scraps", name)
+		}
+		if len(name) > 128 {
+			return fmt.Errorf("environment variable name %q exceeds 128 bytes", name)
+		}
+		if len(value) > maxExecEnvValueSize {
+			return fmt.Errorf("environment variable %q exceeds 64 KiB", name)
+		}
+		if strings.ContainsAny(value, "\x00\r\n") {
+			return fmt.Errorf("environment variable %q contains a NUL or newline", name)
+		}
+		total += len(name) + len(value)
+		if total > maxExecEnvTotalSize {
+			return fmt.Errorf("environment exceeds 256 KiB")
+		}
+	}
+	return nil
 }
 
 type eventWriter struct {

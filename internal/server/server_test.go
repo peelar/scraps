@@ -293,21 +293,70 @@ func TestWorkspaceStartStop(t *testing.T) {
 }
 
 func TestExecUsesVirtualWorkspaceRoot(t *testing.T) {
-	t.Setenv("SCRAPS_TEST_HOST_SECRET", "must-not-leak")
+	hostSecrets := map[string]string{
+		"AWS_SECRET_ACCESS_KEY": "sentinel-aws-secret",
+		"NPM_TOKEN":             "sentinel-npm-token",
+		"OPENAI_API_KEY":        "sentinel-openai-key",
+		"SCRAP_TOKEN":           "sentinel-scrap-token",
+		"SSH_AUTH_SOCK":         "/tmp/sentinel-agent.sock",
+		"UNRELATED_SECRET":      "sentinel-unrelated-secret",
+	}
+	for key, value := range hostSecrets {
+		t.Setenv(key, value)
+	}
 	ts := newTestServer(t)
 	created := ts.createWorkspace(t, workspace.CreateOptions{})
 
 	events := runExec(t, ts, created.ID, map[string]any{
-		"command": "pwd; test -d /workspace; echo /workspace/file.txt; printf 'secret=%s\\n' \"${SCRAPS_TEST_HOST_SECRET-unset}\"; printf 'explicit=%s\\n' \"$EXPLICIT_SAFE\"; printf 'home=%s\\n' \"$HOME\"; printf 'root=%s\\n' \"$SCRAP_WORKSPACE_ROOT\"",
+		"command": "pwd; test -d /workspace; echo /workspace/file.txt; env; printf 'home=%s\\n' \"$HOME\"; printf 'root=%s\\n' \"$SCRAP_WORKSPACE_ROOT\"",
 		"cwd":     ".",
-		"env":     map[string]string{"EXPLICIT_SAFE": "present"},
 	})
 	output := execOutput(events)
-	if output != "/workspace\n/workspace/file.txt\nsecret=unset\nexplicit=present\nhome=/workspace\nroot=/workspace\n" {
-		t.Fatalf("virtualized output = %q", output)
+	for key, value := range hostSecrets {
+		if strings.Contains(output, key+"=") || strings.Contains(output, value) {
+			t.Errorf("output leaked host environment %s", key)
+		}
+	}
+	for _, want := range []string{"/workspace\n", "HOME=/workspace\n", "SCRAP_WORKSPACE_ROOT=/workspace\n", "home=/workspace\n", "root=/workspace\n"} {
+		if !strings.Contains(output, want) {
+			t.Errorf("virtualized output missing %q: %q", want, output)
+		}
 	}
 	if strings.Contains(output, ts.dataDir) {
 		t.Fatalf("output leaked host data directory: %q", output)
+	}
+}
+
+func TestExecInjectsExplicitPerCommandEnvironment(t *testing.T) {
+	ts := newTestServer(t)
+	created := ts.createWorkspace(t, workspace.CreateOptions{})
+
+	events := runExec(t, ts, created.ID, map[string]any{
+		"command": `printf '%s' "$DATABASE_URL"`,
+		"env":     map[string]string{"DATABASE_URL": "postgres://sentinel-approved"},
+	})
+	if output := execOutput(events); output != "postgres://sentinel-approved" {
+		t.Fatalf("output = %q", output)
+	}
+}
+
+func TestExecRejectsInvalidOrReservedEnvironment(t *testing.T) {
+	ts := newTestServer(t)
+	created := ts.createWorkspace(t, workspace.CreateOptions{})
+	for name, value := range map[string]string{
+		"BAD-NAME":        "value",
+		"PATH":            "value",
+		"SCRAP_TOKEN":     "value",
+		"OPENSHELL_TOKEN": "value",
+		"VALID_NAME":      "line one\nline two",
+	} {
+		response := ts.do(t, http.MethodPost, "/v1/workspaces/"+created.ID+"/exec", map[string]any{
+			"command": "true",
+			"env":     map[string]string{name: value},
+		}, "")
+		if response.Code != http.StatusBadRequest {
+			t.Fatalf("env %q status = %d, want 400: %s", name, response.Code, response.Body.String())
+		}
 	}
 }
 

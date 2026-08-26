@@ -14,10 +14,7 @@ func runStatus(args []string) int {
 		fmt.Fprintln(os.Stderr, "usage: scrap status")
 		return 2
 	}
-	endpoint := os.Getenv("SCRAP_DAEMON_URL")
-	if endpoint == "" {
-		endpoint = "http://127.0.0.1:8484"
-	}
+	endpoint := resolvedClientConfig().DaemonURL
 	api := newClientFromEnv()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -59,6 +56,9 @@ func printWorkspaceSummary(api *client.Client) {
 		fmt.Println("  no workspaces yet — open Pi and run: /scrap")
 	case 1:
 		fmt.Printf("  1 workspace (%s) — attach in Pi with: /scrap-select %s\n", workspaces[0].ID, workspaces[0].ID)
+		if ports, err := api.WorkspacePorts(context.Background(), workspaces[0].ID); err == nil && len(ports) > 0 {
+			fmt.Printf("  listening %s — preview: scrap open %s\n", formatPortList(ports), workspaces[0].ID)
+		}
 	default:
 		fmt.Printf("  %d workspaces — list with: scrap ls\n", len(workspaces))
 	}

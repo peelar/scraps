@@ -12,8 +12,6 @@ import (
 	"runtime"
 	"strings"
 	"time"
-
-	"github.com/peelar/scraps/internal/extension"
 )
 
 const (
@@ -46,10 +44,6 @@ func runSetup(args []string) int {
 		return 2
 	}
 
-	if err := installPiExtension(); err != nil {
-		return setupError(err)
-	}
-
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	defer cancel()
 	if err := requireCommand("docker"); err != nil {
@@ -66,19 +60,6 @@ func runSetup(args []string) int {
 	}
 	fmt.Printf("✓ workspace image ready — %s\n", *image)
 	return 0
-}
-
-func installPiExtension() error {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return fmt.Errorf("locate home directory: %w", err)
-	}
-	dir := filepath.Join(home, ".pi", "agent", "extensions", "scraps")
-	if _, err := extension.Install(dir); err != nil {
-		return fmt.Errorf("install Pi extension: %w", err)
-	}
-	fmt.Printf("✓ Pi /scrap extension installed — %s\n", dir)
-	return nil
 }
 
 func imageFromEnv() string {

@@ -67,19 +67,28 @@ export function createRemoteEditOps(session: WorkspaceSession): EditOperations {
 
 /**
  * Streaming command execution: output chunks, exit status, timeouts, aborts,
- * working directory, and environment additions all propagate (ADR 0001).
+ * and working directory all propagate. Pi's general process environment is
+ * ignored; only variables approved in the local Scraps profile are copied.
  */
-export function createRemoteBashOps(session: WorkspaceSession): BashOperations {
+export function createRemoteBashOps(
+	session: WorkspaceSession,
+	approvedEnv: Readonly<Record<string, string>> = {},
+): BashOperations {
 	return {
 		exec: (command, cwd, options) =>
-			remote(session, (ws, client) =>
-				client.exec(ws.id, command, cwd, {
-					onData: options.onData,
-					...(options.signal === undefined ? {} : { signal: options.signal }),
-					...(options.timeout === undefined ? {} : { timeout: options.timeout }),
-					...(options.env === undefined ? {} : { env: options.env }),
-				}),
-			),
+			remote(session, async (ws, client) => {
+				try {
+					return await client.exec(ws.id, command, cwd, {
+						onData: options.onData,
+						...(Object.keys(approvedEnv).length === 0 ? {} : { env: approvedEnv }),
+						...(options.signal === undefined ? {} : { signal: options.signal }),
+						...(options.timeout === undefined ? {} : { timeout: options.timeout }),
+					});
+				} finally {
+					// Commands may leave a server listening; offer a preview hint.
+					session.schedulePortsCheck();
+				}
+			}),
 	};
 }
 

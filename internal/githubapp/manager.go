@@ -123,6 +123,7 @@ func (m *Manager) Start(callbackBase string) (string, string, error) {
 
 func (m *Manager) ManifestHTML(state string) (string, error) {
 	m.mu.Lock()
+	m.pruneFlowsLocked()
 	f := m.flows[state]
 	m.mu.Unlock()
 	if f == nil {
@@ -149,6 +150,7 @@ func (m *Manager) ManifestHTML(state string) (string, error) {
 
 func (m *Manager) CompleteManifest(ctx context.Context, state, code string) (string, error) {
 	m.mu.Lock()
+	m.pruneFlowsLocked()
 	f := m.flows[state]
 	m.mu.Unlock()
 	if f == nil || code == "" {
@@ -192,6 +194,7 @@ func (m *Manager) CompleteManifest(ctx context.Context, state, code string) (str
 
 func (m *Manager) CompleteInstallation(callbackSecret string, installationID int64) error {
 	m.mu.Lock()
+	m.pruneFlowsLocked()
 	state := ""
 	var newest time.Time
 	for candidate, candidateFlow := range m.flows {
@@ -236,6 +239,7 @@ func (m *Manager) CompleteInstallation(callbackSecret string, installationID int
 func (m *Manager) Status(state string) (FlowStatus, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.pruneFlowsLocked()
 	f := m.flows[state]
 	if f == nil {
 		return FlowStatus{}, false

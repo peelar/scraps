@@ -18,8 +18,8 @@
  *   {"type":"exit","code":0,"durationMs":12}
  *   {"type":"exit","code":null,"reason":"timeout","durationMs":30000}
  *
- * Closing the request stream is the abort mechanism: the daemon kills the
- * process group.
+ * Closing the request stream is the abort mechanism. The daemon asks its
+ * trusted provider to terminate the complete remote execution boundary.
  */
 
 import { ScrapdApiError } from "./errors.ts";
@@ -89,12 +89,12 @@ export type GrepResult = {
 export type ExecOptions = {
 	/** Receives decoded output chunks as they stream in. */
 	readonly onData: (chunk: Buffer, stream: "stdout" | "stderr") => void;
-	/** Aborts the command (closing the stream kills the remote process). */
+	/** Aborts the command through the daemon's trusted provider boundary. */
 	readonly signal?: AbortSignal;
 	/** Timeout in seconds; mirrors the local bash tool contract. */
 	readonly timeout?: number;
-	/** Additional environment variables for the command. */
-	readonly env?: NodeJS.ProcessEnv;
+	/** Explicitly user-approved environment values; never the general Pi environment. */
+	readonly env?: Readonly<Record<string, string>>;
 };
 
 type ExecEvent =
@@ -132,6 +132,15 @@ export class ScrapdClient {
 		return this.json("GET", "/v1/info");
 	}
 
+	/** TCP ports listening inside the workspace, for preview hints. */
+	async ports(id: string): Promise<number[]> {
+		const body = await this.json<{ ports?: { port: number }[] }>(
+			"GET",
+			`/v1/workspaces/${encodeURIComponent(id)}/ports`,
+		);
+		return (body.ports ?? []).map((entry) => entry.port).sort((a, b) => a - b);
+	}
+
 	async listWorkspaces(): Promise<WorkspaceRecord[]> {
 		const body = await this.json<{ workspaces?: WorkspaceRecord[] }>(
 			"GET",
@@ -155,13 +164,21 @@ export class ScrapdClient {
 		await this.request("DELETE", `/v1/workspaces/${encodeURIComponent(id)}`);
 	}
 
+	async startWorkspace(id: string): Promise<void> {
+		await this.request("POST", `/v1/workspaces/${encodeURIComponent(id)}/start`);
+	}
+
+	async stopWorkspace(id: string): Promise<void> {
+		await this.request("POST", `/v1/workspaces/${encodeURIComponent(id)}/stop`);
+	}
+
 	/**
 	 * Execute a command in the workspace, streaming output through `onData`.
 	 * Resolves with the process exit status once the stream ends.
 	 *
 	 * The stream is raced against explicit timeout/abort rejections because
 	 * cancelling the response body does not reliably interrupt a stalled
-	 * stream; closing it also signals the daemon to kill the process group.
+	 * stream; closing it also cancels the daemon request context.
 	 */
 	async exec(
 		id: string,
@@ -169,14 +186,17 @@ export class ScrapdClient {
 		cwd: string,
 		options: ExecOptions,
 	): Promise<{ exitCode: number | null }> {
+		if (options.env !== undefined && Object.keys(options.env).length > 0) {
+			assertSecureEnvironmentTransport(this.baseUrl);
+		}
 		const response = await this.request(
 			"POST",
 			`/v1/workspaces/${encodeURIComponent(id)}/exec`,
 			{
 				command,
 				cwd: workspaceRelativePath(cwd),
+				...(options.env === undefined || Object.keys(options.env).length === 0 ? {} : { env: options.env }),
 				...(options.timeout === undefined ? {} : { timeoutMs: options.timeout * 1000 }),
-				...envRecord(options.env),
 			},
 			options.signal,
 		);
@@ -382,23 +402,24 @@ export class ScrapdClient {
 	}
 }
 
+function assertSecureEnvironmentTransport(baseUrl: string): void {
+	const target = new URL(baseUrl);
+	if (target.protocol === "https:") return;
+	if (
+		target.protocol === "http:" &&
+		(target.hostname === "localhost" || target.hostname === "127.0.0.1" || target.hostname === "[::1]")
+	) {
+		return;
+	}
+	throw new Error(
+		`refusing to send approved environment variables over insecure transport to ${target.origin}; use HTTPS`,
+	);
+}
+
 /** scrapd could not be reached at all. */
 export class ScrapsConnectionError extends Error {
 	constructor(message: string) {
 		super(message);
 		this.name = "ScrapsConnectionError";
 	}
-}
-
-function envRecord(env: NodeJS.ProcessEnv | undefined): { env?: Record<string, string> } {
-	if (env === undefined) {
-		return {};
-	}
-	const record: Record<string, string> = {};
-	for (const [key, value] of Object.entries(env)) {
-		if (value !== undefined) {
-			record[key] = value;
-		}
-	}
-	return Object.keys(record).length > 0 ? { env: record } : {};
 }

@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REMOTE=${1:-}
+[[ -n $REMOTE ]] || { echo "usage: scripts/configure-remote-client user@worker-host" >&2; exit 2; }
+SSH=(ssh -o ForwardAgent=no -o ClearAllForwardings=yes)
+if [[ -n ${SCRAPS_SSH_CONFIG:-} ]]; then SSH+=(-F "$SCRAPS_SSH_CONFIG"); fi
+
+payload=$("${SSH[@]}" "$REMOTE" 'sudo -n bash -s' <<'REMOTE_SCRIPT'
+set -euo pipefail
+dns_name=$(tailscale status --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["Self"]["DNSName"].rstrip("."))')
+token=$(sed -n 's/^SCRAPD_TOKEN=//p' /etc/scraps/scrapd.env)
+[[ -n $dns_name && -n $token ]]
+printf '%s\n%s\n' "$dns_name" "$token"
+REMOTE_SCRIPT
+)
+dns_name=$(printf '%s\n' "$payload" | sed -n '1p')
+token=$(printf '%s\n' "$payload" | sed -n '2p')
+[[ $dns_name =~ ^[A-Za-z0-9.-]+$ ]] || { echo "worker returned an invalid Tailscale DNS name" >&2; exit 1; }
+[[ $token =~ ^[A-Fa-f0-9]{64}$ ]] || { echo "worker returned an invalid Scraps token" >&2; exit 1; }
+
+config_root=${XDG_CONFIG_HOME:-$HOME/.config}/scraps
+install -d -m 0700 "$config_root"
+profile=$(mktemp "$config_root/client.json.XXXXXX")
+trap 'rm -f -- "$profile"' EXIT
+chmod 0600 "$profile"
+printf '{"daemon_url":"https://%s","token":"%s"}\n' "$dns_name" "$token" >"$profile"
+mv "$profile" "$config_root/client.json"
+trap - EXIT
+echo "Configured Scraps client for https://$dns_name"
+echo "The scrap CLI and Pi extension will load $config_root/client.json automatically."

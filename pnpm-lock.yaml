@@ -8,6 +8,8 @@ importers:
 
   .: {}
 
+  packages/landing: {}
+
   packages/pi-extension:
     devDependencies:
       '@earendil-works/pi-coding-agent':

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
+import { afterEach, beforeEach, describe, it } from "node:test";
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
@@ -9,6 +9,22 @@ import type { RemoteConfig, SessionBinding } from "./identity.ts";
 import { WorkspaceSession, statusText } from "./workspace.ts";
 
 type CommandHandler = (args: string, ctx: any) => Promise<void>;
+
+// Keep tests hermetic: defaultRemoteConfig() reads clientEnvironment() with
+// the real process env, which would otherwise pick up this machine's
+// ~/.config/scraps/client.json (e.g. written by `scrap attach`).
+let priorProfile: string | undefined;
+beforeEach(() => {
+	priorProfile = process.env.SCRAPS_CLIENT_CONFIG;
+	process.env.SCRAPS_CLIENT_CONFIG = "/nonexistent/scraps-test-profile.json";
+});
+afterEach(() => {
+	if (priorProfile === undefined) {
+		delete process.env.SCRAPS_CLIENT_CONFIG;
+	} else {
+		process.env.SCRAPS_CLIENT_CONFIG = priorProfile;
+	}
+});
 
 function commandHarness(session: WorkspaceSession) {
 	const commands = new Map<string, CommandHandler>();
@@ -27,6 +43,7 @@ function commandHarness(session: WorkspaceSession) {
 		() => statuses.push(statusText(session)),
 		activate,
 		(binding) => bindings.push(binding),
+		() => {},
 	);
 	const ctx = {
 		cwd: "/tmp/project",

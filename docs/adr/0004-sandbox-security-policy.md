@@ -51,10 +51,13 @@ the complete `scrapd` environment.
 
 The baseline contains only provider-defined values for `HOME`, `PATH`, `SHELL`,
 `TMPDIR`, locale/terminal settings when present, and
-`SCRAP_WORKSPACE_ROOT=/workspace`. `HOME` and `TMPDIR` live inside provider-owned
-workspace storage. Explicit per-command environment values in the authenticated
-exec request may override the baseline; this is an intentional client action,
-not inheritance.
+`SCRAP_WORKSPACE_ROOT=/workspace`. `HOME` and `TMPDIR` live inside
+provider-owned workspace storage. The exec API accepts only explicit,
+request-scoped overrides: the Pi extension filters its startup environment
+through the name-only allowlist in the user's local mode-0600 Scraps profile.
+Reserved control variables, invalid names, newlines, NULs, and oversized maps
+are rejected at the daemon boundary. Brokered grants remain preferred because
+raw approved values are readable by every process in the sandbox.
 
 The directory provider enforces this minimal environment to prevent accidental
 secret leakage, while remaining explicitly bypassable by arbitrary host shell

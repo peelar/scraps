@@ -9,6 +9,8 @@ const context = {
 	daemonUrl: "http://scrapd.internal:8484",
 	root: "/work/project",
 	status: "running",
+	loadedEnvironment: ["DATABASE_URL"],
+	missingEnvironment: ["STRIPE_API_KEY"],
 };
 
 describe("remoteContextBlock", () => {
@@ -23,6 +25,11 @@ describe("remoteContextBlock", () => {
 		]) {
 			assert.ok(block.includes(expected), `missing: ${expected}`);
 		}
+		assert.ok(block.includes("scrap open"));
+		assert.ok(block.includes("Approved and loaded: DATABASE_URL"));
+		assert.ok(block.includes("Approved but missing at Pi startup: STRIPE_API_KEY"));
+		assert.ok(block.includes("scrap env allow NAME"));
+		assert.ok(block.includes("Never ask the user"));
 	});
 
 	it("tolerates an unknown project", () => {

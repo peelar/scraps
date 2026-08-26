@@ -7,13 +7,16 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/peelar/scraps/internal/provider"
 	"github.com/peelar/scraps/internal/store"
@@ -54,6 +57,51 @@ func (d *Directory) Start(c context.Context, id string) error              { ret
 func (d *Directory) Stop(c context.Context, id string) error               { return d.manager.Stop(c, id) }
 func (d *Directory) Delete(c context.Context, id string) error             { return d.manager.Delete(c, id) }
 
+// ProbePorts lists the ports the directory provider checks for listeners.
+// The trusted host has no portable listener table, so common development
+// ports are dialed directly. It is a variable so tests can inject targets.
+var ProbePorts = []int{3000, 3001, 3333, 4000, 4200, 5000, 5173, 5174, 8000, 8080, 8081, 8888, 9000}
+
+// Ports probes common development ports on the daemon host loopback.
+func (d *Directory) Ports(ctx context.Context, id string) ([]provider.Port, error) {
+	if _, err := d.Get(ctx, id); err != nil {
+		return nil, err
+	}
+	var ports []provider.Port
+	for _, candidate := range ProbePorts {
+		conn, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(candidate)), 150*time.Millisecond)
+		if err != nil {
+			continue
+		}
+		_ = conn.Close()
+		ports = append(ports, provider.Port{Port: candidate, Address: "127.0.0.1"})
+	}
+	return ports, nil
+}
+
+// Tunnel dials the daemon host loopback directly; the directory provider
+// runs workspace processes on the host without isolation.
+func (d *Directory) Tunnel(ctx context.Context, id string, port int) (provider.TunnelConn, error) {
+	if _, err := d.Get(ctx, id); err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	conn, err := net.DialTCP("tcp", nil, &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: port})
+	if err != nil {
+		return nil, &provider.TunnelDialError{Port: port, Reason: err.Error()}
+	}
+	return hostTunnel{conn}, nil
+}
+
+type hostTunnel struct{ conn *net.TCPConn }
+
+func (t hostTunnel) Read(b []byte) (int, error)  { return t.conn.Read(b) }
+func (t hostTunnel) Write(b []byte) (int, error) { return t.conn.Write(b) }
+func (t hostTunnel) CloseWrite() error           { return t.conn.CloseWrite() }
+func (t hostTunnel) Close() error                { return t.conn.Close() }
+
 func (d *Directory) path(id, path string) (string, error) { return d.manager.ResolvePath(id, path) }
 
 func (d *Directory) Exec(ctx context.Context, id string, r provider.ExecRequest, emit func(provider.ExecEvent)) error {
@@ -82,9 +130,12 @@ func (d *Directory) Exec(ctx context.Context, id string, r provider.ExecRequest,
 	// Sandboxed providers mount /workspace directly. The trusted directory
 	// provider emulates it and redacts its private host root from output.
 	command := strings.ReplaceAll(r.Command, workspace.VirtualRoot, hostRoot)
-	commandEnv, err := directoryEnvironment(hostRoot, r.Env)
+	commandEnv, err := directoryEnvironment(hostRoot)
 	if err != nil {
 		return err
+	}
+	for name, value := range r.Env {
+		commandEnv = append(commandEnv, name+"="+value)
 	}
 	cmd := exec.CommandContext(ctx, "/bin/bash", "-c", command)
 	cmd.Dir = cwd
@@ -148,7 +199,7 @@ func copyOutput(wg *sync.WaitGroup, r io.Reader, stream, hostRoot string, emit f
 		}
 	}
 }
-func directoryEnvironment(hostRoot string, requested map[string]string) ([]string, error) {
+func directoryEnvironment(hostRoot string) ([]string, error) {
 	tmp := filepath.Join(hostRoot, ".scrap", "tmp")
 	if err := os.MkdirAll(tmp, 0o700); err != nil {
 		return nil, fmt.Errorf("create workspace temp directory: %w", err)
@@ -166,9 +217,6 @@ func directoryEnvironment(hostRoot string, requested map[string]string) ([]strin
 		if value := os.Getenv(key); value != "" {
 			env[key] = value
 		}
-	}
-	for key, value := range requested {
-		env[key] = value
 	}
 	out := make([]string, 0, len(env))
 	for key, value := range env {

@@ -1,0 +1,11 @@
+{
+  "name": "@scraps/landing",
+  "version": "0.0.0",
+  "private": true,
+  "scripts": {
+    "build": "node build.mjs",
+    "check": "node check.mjs",
+    "dev": "node dev.mjs",
+    "test": "node check.mjs"
+  }
+}

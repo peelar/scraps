@@ -20,6 +20,7 @@ import { WorkspaceSession } from "../src/workspace.ts";
 import {
 	createRemoteBashOps,
 	createRemoteEditOps,
+	createRemoteFindOps,
 	createRemoteLsOps,
 	createRemoteReadOps,
 	runRemoteGrep,
@@ -41,7 +42,7 @@ function step(name: string, fn: () => Promise<string>) {
 		});
 }
 
-const session = new WorkspaceSession(() => new ScrapdClient(url));
+const session = new WorkspaceSession((baseUrl, token) => new ScrapdClient(baseUrl, token));
 session.configure({
 	daemonUrl: url,
 	workspaceId: existingId,
@@ -135,12 +136,65 @@ await step("ls lists directory entries", async () => {
 	return entries.join(", ");
 });
 
+await step("find walks workspace paths", async () => {
+	const ops = createRemoteFindOps(session);
+	const paths = await ops.glob("integration.*", root, { ignore: [], limit: 100 });
+	for (const expected of [`${root}/integration.bin`, `${root}/integration.txt`]) {
+		if (!paths.includes(expected)) {
+			throw new Error(`missing ${expected} in ${JSON.stringify(paths)}`);
+		}
+	}
+	return paths.join(", ");
+});
+
 await step("grep formats matches like the built-in", async () => {
 	const result = await runRemoteGrep(session, { pattern: "gamma" });
 	if (!result.text.includes("integration.txt:2: gamma")) {
 		throw new Error(`unexpected grep output: ${result.text}`);
 	}
 	return result.text.trim();
+});
+
+await step("aborting exec kills its remote process group", async () => {
+	const client = session.requireClient();
+	const controller = new AbortController();
+	const running = client.exec(session.workspaceId ?? "", "echo $$ > integration.pid; sleep 600", root, {
+		onData: () => {},
+		signal: controller.signal,
+	});
+	await new Promise((resolve) => setTimeout(resolve, 500));
+	controller.abort();
+	await running.catch(() => {});
+	let output = "";
+	const probe = await client.exec(
+		session.workspaceId ?? "",
+		"pid=$(cat integration.pid); if kill -0 \"$pid\" 2>/dev/null; then echo alive; exit 1; fi; echo reaped",
+		root,
+		{ onData: (chunk) => { output += chunk.toString("utf8"); } },
+	);
+	if (probe.exitCode !== 0 || output.trim() !== "reaped") {
+		throw new Error(`remote process survived abort: ${JSON.stringify(output)}`);
+	}
+	return output.trim();
+});
+
+await step("stop/start preserves files and rejects execution while stopped", async () => {
+	const client = session.requireClient();
+	const id = session.workspaceId ?? "";
+	await client.stopWorkspace(id);
+	const stopped = await client.getWorkspace(id);
+	if (stopped.state !== "stopped") throw new Error(`unexpected stopped state: ${stopped.state}`);
+	let rejected = false;
+	try {
+		await client.exec(id, "true", root, { onData: () => {} });
+	} catch {
+		rejected = true;
+	}
+	if (!rejected) throw new Error("execution succeeded while workspace was stopped");
+	await client.startWorkspace(id);
+	const content = await client.readFile(id, `${root}/integration.txt`);
+	if (content.toString("utf8") !== "alpha\ngamma\n") throw new Error("workspace content was not preserved");
+	return "stopped, fail-closed, restarted, data preserved";
 });
 
 if (created) {

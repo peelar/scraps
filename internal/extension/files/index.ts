@@ -13,8 +13,10 @@
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { fileURLToPath } from "node:url";
 
 import { registerScrapCommands } from "./commands.ts";
+import { approvedCommandEnvironmentState, clientEnvironment } from "./config.ts";
 import {
 	SESSION_BINDING_ENTRY,
 	resolveSessionMode,
@@ -23,7 +25,7 @@ import {
 } from "./identity.ts";
 import { createRemoteBashOps } from "./operations.ts";
 import { adaptSystemPrompt } from "./prompt.ts";
-import { statusText } from "./workspace.ts";
+import { portsHint, statusText } from "./workspace.ts";
 import { REMOTE_TOOL_NAMES, registerRemoteTools } from "./tools.ts";
 import { WorkspaceSession, describeError } from "./workspace.ts";
 
@@ -41,7 +43,30 @@ export default function scrapsExtension(pi: ExtensionAPI): void {
 	});
 
 	const session = new WorkspaceSession();
+	const environmentState = approvedCommandEnvironmentState();
+	const approvedEnv = environmentState.values;
 	let toolsRegistered = false;
+	let environmentNoticeShown = false;
+
+	const notifyEnvironment = (ui: { notify: (message: string, level: "info" | "warning" | "error") => void }) => {
+		if (environmentNoticeShown) return;
+		environmentNoticeShown = true;
+		if (environmentState.missing.length > 0) {
+			ui.notify(
+				`Scraps: approved environment ${environmentState.missing.join(", ")} ${environmentState.missing.length === 1 ? "was" : "were"} not set when Pi started. Restart Pi through your secret manager to load ${environmentState.missing.length === 1 ? "it" : "them"}.`,
+				"warning",
+			);
+			return;
+		}
+		if (environmentState.loaded.length > 0) {
+			ui.notify(`Scraps: loaded approved environment: ${environmentState.loaded.join(", ")}.`, "info");
+			return;
+		}
+		ui.notify(
+			"Scraps isolates your local environment by default. If software needs a variable, the agent will guide you through approving it safely.",
+			"info",
+		);
+	};
 
 	const refreshStatus = (ui: { setStatus: (key: string, text: string | undefined) => void }) => {
 		ui.setStatus(STATUS_KEY, statusText(session));
@@ -50,7 +75,7 @@ export default function scrapsExtension(pi: ExtensionAPI): void {
 	const activateRemote = (config: Parameters<WorkspaceSession["configure"]>[0]) => {
 		session.configure(config);
 		if (!toolsRegistered) {
-			registerRemoteTools(pi, session);
+			registerRemoteTools(pi, session, approvedEnv);
 			const active = pi.getActiveTools();
 			pi.setActiveTools([...new Set([...active, ...REMOTE_TOOL_NAMES])]);
 			toolsRegistered = true;
@@ -61,7 +86,13 @@ export default function scrapsExtension(pi: ExtensionAPI): void {
 		pi.appendEntry(SESSION_BINDING_ENTRY, binding);
 	};
 
-	registerScrapCommands(pi, session, refreshStatus, activateRemote, persistBinding);
+	registerScrapCommands(pi, session, refreshStatus, activateRemote, persistBinding, notifyEnvironment);
+
+	// Ship the Scraps skill with the extension so Pi can guide setup (worker
+	// discovery, `scrap attach`, workspace lifecycle) without a source checkout.
+	pi.on("resources_discover", async () => ({
+		skillPaths: [fileURLToPath(new URL("./skills", import.meta.url))],
+	}));
 
 	pi.on("session_start", async (_event, ctx) => {
 		// CLI flags are not available during the factory; resolve identity now.
@@ -72,7 +103,7 @@ export default function scrapsExtension(pi: ExtensionAPI): void {
 					scrap: pi.getFlag("scrap"),
 					workspace: pi.getFlag("workspace"),
 				},
-				env: process.env,
+				env: clientEnvironment(),
 			},
 			binding,
 		);
@@ -83,6 +114,16 @@ export default function scrapsExtension(pi: ExtensionAPI): void {
 		}
 
 		activateRemote(mode.config);
+		notifyEnvironment(ctx.ui);
+
+		// Preview hints: notify when a workspace port starts listening.
+		session.setPortsListener((ports) => {
+			if (!ctx.hasUI) {
+				return;
+			}
+			ctx.ui.notify(portsHint(ports), "info");
+			refreshStatus(ctx.ui);
+		});
 
 		if (mode.config.workspaceId !== undefined) {
 			try {
@@ -123,6 +164,8 @@ export default function scrapsExtension(pi: ExtensionAPI): void {
 				daemonUrl,
 				root: session.root,
 				status: workspace?.state ?? "disconnected",
+				loadedEnvironment: environmentState.loaded,
+				missingEnvironment: environmentState.missing,
 			}),
 		};
 	});
@@ -133,6 +176,6 @@ export default function scrapsExtension(pi: ExtensionAPI): void {
 		if (!session.remoteMode) {
 			return undefined;
 		}
-		return { operations: createRemoteBashOps(session) };
+		return { operations: createRemoteBashOps(session, approvedEnv) };
 	});
 }

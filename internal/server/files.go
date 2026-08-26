@@ -174,6 +174,11 @@ func decode(w http.ResponseWriter, r *http.Request, v any) error {
 	return nil
 }
 func writeProviderError(w http.ResponseWriter, e error) {
+	var dial *provider.TunnelDialError
+	if errors.As(e, &dial) {
+		writeError(w, http.StatusBadGateway, "tunnel_dial_failed", dial.Error())
+		return
+	}
 	var invalid *provider.InvalidRequestError
 	if errors.As(e, &invalid) {
 		writeError(w, 400, "invalid_request", invalid.Error())

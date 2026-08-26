@@ -95,16 +95,9 @@ func TestGitHubAuthUsesGitHubCompatibleLoopbackURL(t *testing.T) {
 }
 
 func TestTokenRequired(t *testing.T) {
-	apiServer, err := server.New(server.Config{DataDir: t.TempDir(), Token: "secret"})
-	if err != nil {
-		t.Fatalf("new server: %v", err)
-	}
-	t.Cleanup(apiServer.Close)
-	testServer := httptest.NewServer(apiServer.Handler())
-	t.Cleanup(testServer.Close)
-
-	client := New(testServer.URL, "") // no token
-	err = client.Ping(context.Background())
+	authorized := newTestClient(t, "secret")
+	client := New(authorized.baseURL, "") // no token
+	err := client.Ping(context.Background())
 	if err == nil {
 		t.Fatal("ping without token succeeded")
 	}
@@ -115,14 +108,7 @@ func TestTokenRequired(t *testing.T) {
 }
 
 func TestExecStreamDecoding(t *testing.T) {
-	apiServer, err := server.New(server.Config{DataDir: t.TempDir(), Token: ""})
-	if err != nil {
-		t.Fatalf("new server: %v", err)
-	}
-	t.Cleanup(apiServer.Close)
-	testServer := httptest.NewServer(apiServer.Handler())
-	t.Cleanup(testServer.Close)
-	client := New(testServer.URL, "")
+	client := newTestClient(t, "")
 
 	created, err := client.CreateWorkspace(context.Background(), "demo", "")
 	if err != nil {
@@ -132,10 +118,10 @@ func TestExecStreamDecoding(t *testing.T) {
 	// The CLI does not exec, but the stream contract is exercised here so the
 	// client package doubles as an API conformance check.
 	request, _ := http.NewRequest(http.MethodPost,
-		testServer.URL+"/v1/workspaces/"+created.ID+"/exec",
+		client.baseURL+"/v1/workspaces/"+created.ID+"/exec",
 		strings.NewReader(`{"command":"echo hi"}`))
 	request.Header.Set("Content-Type", "application/json")
-	response, err := testServer.Client().Do(request)
+	response, err := client.http.Do(request)
 	if err != nil {
 		t.Fatalf("exec: %v", err)
 	}

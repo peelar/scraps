@@ -8,8 +8,9 @@ import path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 import { DEFAULT_DAEMON_URL } from "./client.ts";
+import { clientEnvironment } from "./config.ts";
 import type { RemoteConfig, SessionBinding } from "./identity.ts";
-import { describeError, describeSession, type WorkspaceSession } from "./workspace.ts";
+import { describeError, describeSession, portsHint, type WorkspaceSession } from "./workspace.ts";
 
 /** Minimal UI surface the commands need (satisfied by ExtensionContext.ui). */
 type Ui = {
@@ -23,13 +24,17 @@ export function registerScrapCommands(
 	refreshStatus: (ui: Ui) => void,
 	activateRemote: (config: RemoteConfig) => void,
 	persistBinding: (binding: SessionBinding) => void,
+	notifyEnvironment: (ui: Ui) => void,
 ): void {
-	const defaultRemoteConfig = (): RemoteConfig => ({
-		daemonUrl: process.env.SCRAP_DAEMON_URL ?? DEFAULT_DAEMON_URL,
-		workspaceId: process.env.SCRAP_WORKSPACE_ID,
-		project: process.env.SCRAP_PROJECT,
-		token: process.env.SCRAP_TOKEN,
-	});
+	const defaultRemoteConfig = (): RemoteConfig => {
+		const env = clientEnvironment();
+		return {
+			daemonUrl: env.SCRAP_DAEMON_URL ?? DEFAULT_DAEMON_URL,
+			workspaceId: env.SCRAP_WORKSPACE_ID,
+			project: env.SCRAP_PROJECT,
+			token: env.SCRAP_TOKEN,
+		};
+	};
 	const persistRemote = () => {
 		const project = session.connectedWorkspace?.project ?? session.project;
 		persistBinding({
@@ -46,6 +51,14 @@ export function registerScrapCommands(
 			return false;
 		}
 		return true;
+	};
+
+	/** Preview hints: notify when a workspace port starts listening. */
+	const wirePortsNotifier = (ui: Ui): void => {
+		session.setPortsListener((ports) => {
+			ui.notify(portsHint(ports), "info");
+			refreshStatus(ui);
+		});
 	};
 
 	pi.registerCommand("scrap", {
@@ -84,6 +97,7 @@ export function registerScrapCommands(
 
 			if (!session.remoteMode) {
 				activateRemote(defaultRemoteConfig());
+				notifyEnvironment(ctx.ui);
 				persistRemote();
 				refreshStatus(ctx.ui);
 			}
@@ -96,16 +110,17 @@ export function registerScrapCommands(
 								args.trim() || session.project || path.basename(ctx.cwd) || "workspace",
 							)
 						: await session.connect(configuredWorkspace);
+				wirePortsNotifier(ctx.ui);
 				persistRemote();
 				refreshStatus(ctx.ui);
 				ctx.ui.notify(`Connected to Scraps workspace ${workspace.id}.`, "info");
 			} catch (error) {
 				refreshStatus(ctx.ui);
-				ctx.ui.notify(
-					`Cannot start Scraps workspace: ${describeError(error)}. ` +
-						"Start the worker VM with `make up`, then run /scrap again.",
-					"error",
-				);
+				const local = session.daemonUrl === undefined || session.daemonUrl === DEFAULT_DAEMON_URL;
+				const hint = local
+					? "Start the local worker VM with `make up`, or attach a remote worker with `scrap attach`, then run /scrap again."
+					: `Check the worker with \`scrap status\` (${session.daemonUrl}); if it moved, re-attach with \`scrap attach\`.`;
+				ctx.ui.notify(`Cannot start Scraps workspace: ${describeError(error)}. ${hint}`, "error");
 			}
 		},
 	});
@@ -142,11 +157,13 @@ export function registerScrapCommands(
 			}
 			if (!session.remoteMode) {
 				activateRemote({ ...defaultRemoteConfig(), workspaceId: id });
+				notifyEnvironment(ctx.ui);
 				persistRemote();
 				refreshStatus(ctx.ui);
 			}
 			try {
 				const workspace = await session.connect(id);
+				wirePortsNotifier(ctx.ui);
 				persistRemote();
 				refreshStatus(ctx.ui);
 				ctx.ui.notify(`Connected to Scraps workspace ${workspace.id}.`, "info");
@@ -166,6 +183,7 @@ export function registerScrapCommands(
 			const project = args.trim();
 			try {
 				const workspace = await session.create(project.length > 0 ? project : undefined);
+				wirePortsNotifier(ctx.ui);
 				persistRemote();
 				refreshStatus(ctx.ui);
 				ctx.ui.notify(`Created Scraps workspace ${workspace.id}.`, "info");

@@ -8,6 +8,7 @@ import { ScrapdApiError } from "./errors.ts";
 type FakeDaemon = {
 	server: Server;
 	url: string;
+	execBodies: unknown[];
 	close: () => Promise<void>;
 };
 
@@ -17,6 +18,7 @@ type FakeDaemon = {
  */
 async function startFakeDaemon(): Promise<FakeDaemon> {
 	const files = new Map<string, Buffer>();
+	const execBodies: unknown[] = [];
 
 	const server = createServer((request, response) => {
 		const chunks: Buffer[] = [];
@@ -39,6 +41,14 @@ async function startFakeDaemon(): Promise<FakeDaemon> {
 						rootPath: "/workspace",
 						pathContract: "workspace-relative-v1",
 					}),
+				);
+				return;
+			}
+
+			if (route === "GET /v1/workspaces/ws-1/ports") {
+				response.writeHead(200, { "Content-Type": "application/json" });
+				response.end(
+					JSON.stringify({ ports: [{ port: 5173, address: "127.0.0.1" }, { port: 3000, address: "0.0.0.0" }] }),
 				);
 				return;
 			}
@@ -87,6 +97,7 @@ async function startFakeDaemon(): Promise<FakeDaemon> {
 			}
 
 			if (route.startsWith("POST /v1/workspaces/") && route.endsWith("/exec")) {
+				execBodies.push(body);
 				const workspaceId = request.url?.split("/")[3] ?? "";
 				if (workspaceId === "ws-hang") {
 					// Never sends an exit event; used for timeout/abort tests.
@@ -124,6 +135,7 @@ async function startFakeDaemon(): Promise<FakeDaemon> {
 	return {
 		server,
 		url: `http://127.0.0.1:${address.port}`,
+		execBodies,
 		close: () =>
 			new Promise<void>((resolve, reject) => {
 				// Destroy open sockets (hanging exec streams) so close resolves.
@@ -152,6 +164,17 @@ describe("ScrapdClient", () => {
 			assert.equal(workspace.rootPath, "/workspace");
 			assert.equal(workspace.pathContract, "workspace-relative-v1");
 			assert.equal(workspace.state, "running");
+		} finally {
+			await daemon.close();
+		}
+	});
+
+	it("lists listening workspace ports sorted", async () => {
+		const daemon = await startFakeDaemon();
+		try {
+			const client = new ScrapdClient(daemon.url);
+			const ports = await client.ports("ws-1");
+			assert.deepEqual(ports, [3000, 5173]);
 		} finally {
 			await daemon.close();
 		}
@@ -210,6 +233,35 @@ describe("ScrapdClient", () => {
 		} finally {
 			await daemon.close();
 		}
+	});
+
+	it("sends only an explicitly supplied exec environment", async () => {
+		const daemon = await startFakeDaemon();
+		try {
+			const client = new ScrapdClient(daemon.url);
+			await client.exec("ws-1", "env", "/workspace", {
+				onData: () => {},
+				env: { DATABASE_URL: "postgres://sentinel-approved" },
+			});
+			assert.deepEqual(daemon.execBodies.at(-1), {
+				command: "env",
+				cwd: ".",
+				env: { DATABASE_URL: "postgres://sentinel-approved" },
+			});
+		} finally {
+			await daemon.close();
+		}
+	});
+
+	it("refuses approved environment values over non-loopback HTTP", async () => {
+		const client = new ScrapdClient("http://worker.example:8484");
+		await assert.rejects(
+			() => client.exec("ws-1", "env", "/workspace", {
+				onData: () => {},
+				env: { DATABASE_URL: "postgres://sentinel-approved" },
+			}),
+			/use HTTPS/,
+		);
 	});
 
 	it("translates server-side timeout exits to the local tool's message", async () => {

@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"os/exec"
 	"path"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -23,8 +24,58 @@ import (
 const defaultOpenShellImage = "scraps-dev:bookworm"
 
 type OpenShell struct {
-	store *store.Store
-	image string
+	store      *store.Store
+	image      string
+	executions keyedExecutionLocks
+}
+
+// keyedExecutionLocks serializes commands within one sandbox. Cancellation
+// recycles that sandbox, so overlapping execs would otherwise be collateral
+// damage. Entries are reference-counted so deleted workspaces do not leak
+// lock state forever.
+type keyedExecutionLocks struct {
+	mu      sync.Mutex
+	entries map[string]*keyedExecutionLock
+}
+
+type keyedExecutionLock struct {
+	gate chan struct{}
+	refs int
+}
+
+func (l *keyedExecutionLocks) acquire(ctx context.Context, id string) (func(), error) {
+	l.mu.Lock()
+	if l.entries == nil {
+		l.entries = make(map[string]*keyedExecutionLock)
+	}
+	entry := l.entries[id]
+	if entry == nil {
+		entry = &keyedExecutionLock{gate: make(chan struct{}, 1)}
+		entry.gate <- struct{}{}
+		l.entries[id] = entry
+	}
+	entry.refs++
+	l.mu.Unlock()
+
+	select {
+	case <-ctx.Done():
+		l.releaseRef(id, entry)
+		return nil, ctx.Err()
+	case <-entry.gate:
+		return func() {
+			entry.gate <- struct{}{}
+			l.releaseRef(id, entry)
+		}, nil
+	}
+}
+
+func (l *keyedExecutionLocks) releaseRef(id string, entry *keyedExecutionLock) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	entry.refs--
+	if entry.refs == 0 {
+		delete(l.entries, id)
+	}
 }
 
 func NewOpenShell(ctx context.Context, st *store.Store, image string) (*OpenShell, error) {
@@ -111,10 +162,37 @@ func (o *OpenShell) Ready(ctx context.Context) ([]workspace.Workspace, error) {
 	if err != nil {
 		return nil, err
 	}
+	listed, err := o.run(ctx, nil, "sandbox", "list", "--output", "json")
+	if err != nil {
+		return nil, err
+	}
+	var sandboxes []struct {
+		Name  string `json:"name"`
+		Phase string `json:"phase"`
+	}
+	if err := json.Unmarshal(listed, &sandboxes); err != nil {
+		return nil, fmt.Errorf("decode openshell sandbox list: %w", err)
+	}
+	phaseByName := make(map[string]string, len(sandboxes))
+	for _, sandbox := range sandboxes {
+		phaseByName[sandbox.Name] = sandbox.Phase
+	}
 	var out []workspace.Workspace
 	for _, w := range rows {
 		if w.Provider == "openshell" && w.State == "preheated" {
-			out = append(out, publicWorkspace(w))
+			phase := phaseByName[w.ID]
+			if phase == "Ready" || phase == "Running" {
+				out = append(out, publicWorkspace(w))
+				continue
+			}
+			// Preheated records have no user data. A crash can leave their row
+			// after OpenShell has reclaimed (or failed) the corresponding sandbox.
+			if phase != "" {
+				_, _ = o.run(context.Background(), nil, "sandbox", "delete", w.ID)
+			}
+			if err := o.store.DeleteWorkspace(ctx, w.ID); err != nil {
+				return nil, err
+			}
 		}
 	}
 	return out, nil
@@ -224,6 +302,12 @@ func (o *OpenShell) execOutput(ctx context.Context, id string, stdin []byte, arg
 	return o.execRaw(ctx, id, stdin, args...)
 }
 func (o *OpenShell) Exec(ctx context.Context, id string, r ExecRequest, emit func(ExecEvent)) error {
+	unlock, err := o.executions.acquire(ctx, id)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+
 	if err := o.ensure(ctx, id); err != nil {
 		return err
 	}
@@ -236,13 +320,19 @@ func (o *OpenShell) Exec(ctx context.Context, id string, r ExecRequest, emit fun
 	}
 	args := []string{"sandbox", "exec", "--no-tty", "--name", id, "--workdir", cwd}
 	env := []string{"HOME=/workspace", "PATH=/usr/local/bin:/usr/bin:/bin", "SHELL=/bin/bash", "TMPDIR=/workspace/.scrap/tmp", "SCRAP_WORKSPACE_ROOT=/workspace"}
-	for k, v := range r.Env {
-		env = append(env, k+"="+v)
+	approvedNames := make([]string, 0, len(r.Env))
+	for name := range r.Env {
+		approvedNames = append(approvedNames, name)
+	}
+	sort.Strings(approvedNames)
+	for _, name := range approvedNames {
+		env = append(env, name+"="+r.Env[name])
 	}
 	for _, v := range env {
 		args = append(args, "--env", v)
 	}
-	args = append(args, "--", "/bin/bash", "-c", "mkdir -p /workspace/.scrap/tmp; exec /bin/bash -c \"$1\"", "scrap", r.Command)
+	const runScript = `mkdir -p /workspace/.scrap/tmp; exec /bin/bash -c "$1"`
+	args = append(args, "--", "/bin/bash", "-c", runScript, "scrap", r.Command)
 	cmd := exec.CommandContext(ctx, "openshell", args...)
 	stdout, e := cmd.StdoutPipe()
 	if e != nil {
@@ -255,6 +345,18 @@ func (o *OpenShell) Exec(ctx context.Context, id string, r ExecRequest, emit fun
 	if e = cmd.Start(); e != nil {
 		return e
 	}
+	cleanupDone := make(chan error, 1)
+	commandDone := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			cleanupCtx, cancel := context.WithTimeout(context.Background(), time.Minute)
+			defer cancel()
+			cleanupDone <- o.recycleSandbox(cleanupCtx, id)
+		case <-commandDone:
+			cleanupDone <- nil
+		}
+	}()
 	emit(ExecEvent{Type: "start", PID: cmd.Process.Pid})
 	var wg sync.WaitGroup
 	wg.Add(2)
@@ -262,16 +364,21 @@ func (o *OpenShell) Exec(ctx context.Context, id string, r ExecRequest, emit fun
 	go copyOpenShellOutput(&wg, stderr, "stderr", emit)
 	wg.Wait()
 	waitErr := cmd.Wait()
+	close(commandDone)
+	cleanupErr := <-cleanupDone
+	if cleanupErr != nil {
+		return fmt.Errorf("cancel command and restore sandbox: %w", cleanupErr)
+	}
 	event := ExecEvent{Type: "exit"}
 	var exitErr *exec.ExitError
 	switch {
-	case waitErr == nil:
-		code := 0
-		event.Code = &code
 	case errors.Is(ctx.Err(), context.DeadlineExceeded):
 		event.Reason = "timeout"
 	case errors.Is(ctx.Err(), context.Canceled):
 		event.Reason = "cancelled"
+	case waitErr == nil:
+		code := 0
+		event.Code = &code
 	case errors.As(waitErr, &exitErr):
 		code := exitErr.ExitCode()
 		event.Code = &code
@@ -279,6 +386,26 @@ func (o *OpenShell) Exec(ctx context.Context, id string, r ExecRequest, emit fun
 		return waitErr
 	}
 	emit(event)
+	return nil
+}
+
+// recycleSandbox is the trusted cancellation boundary. OpenShell stop tears
+// down the sandbox compute (and therefore every descendant process) while
+// retaining its persistent workspace; start restores the recorded workload.
+// No identifier or process metadata is read from the untrusted workspace.
+func (o *OpenShell) recycleSandbox(ctx context.Context, id string) error {
+	if _, err := o.run(ctx, nil, "sandbox", "stop", id); err != nil {
+		return fmt.Errorf("stop sandbox: %w", err)
+	}
+	if err := o.store.UpdateWorkspaceState(ctx, id, "stopped"); err != nil {
+		return fmt.Errorf("record stopped sandbox: %w", err)
+	}
+	if _, err := o.run(ctx, nil, "sandbox", "start", id); err != nil {
+		return fmt.Errorf("restart sandbox: %w", err)
+	}
+	if err := o.store.UpdateWorkspaceState(ctx, id, "running"); err != nil {
+		return fmt.Errorf("record restarted sandbox: %w", err)
+	}
 	return nil
 }
 func copyOpenShellOutput(wg *sync.WaitGroup, r io.Reader, stream string, emit func(ExecEvent)) {

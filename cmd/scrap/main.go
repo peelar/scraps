@@ -17,9 +17,14 @@ Commands:
   start <id>    Start a stopped workspace
   stop <id>     Stop a running workspace
   rm <id>...    Remove workspaces
+  open [id] [port]
+                Tunnel a workspace port to localhost and open it
+  attach [user@]worker
+                Discover a tailnet Scraps worker and configure this computer
   status        Show daemon and workspace status
   configure     Configure local worker VM sizing
   auth github   Grant repositories to a self-hosted GitHub App
+  env           Manage explicit environment-variable approvals
   version       Print version information
 
 Environment:
@@ -48,12 +53,18 @@ func run(args []string) int {
 		return runWorkspaceState(command, rest)
 	case "rm":
 		return runRemove(rest)
+	case "open":
+		return runOpen(rest)
+	case "attach":
+		return runAttach(rest)
 	case "configure":
 		return runConfigure(rest)
 	case "_worker-setup":
 		return runSetup(rest)
 	case "auth":
 		return runAuth(rest)
+	case "env":
+		return runEnv(rest)
 	case "status":
 		return runStatus(rest)
 	default:

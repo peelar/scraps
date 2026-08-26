@@ -21,6 +21,8 @@ type Client struct {
 	baseURL string
 	token   string
 	http    *http.Client
+	// stream carries long-lived tunnel connections without the API timeout.
+	stream *http.Client
 }
 
 // New builds a client for baseURL (e.g. http://127.0.0.1:8484).
@@ -29,6 +31,7 @@ func New(baseURL, token string) *Client {
 		baseURL: strings.TrimRight(baseURL, "/"),
 		token:   token,
 		http:    &http.Client{Timeout: 15 * time.Minute},
+		stream:  &http.Client{},
 	}
 }
 
@@ -206,4 +209,81 @@ func (c *Client) StopWorkspace(ctx context.Context, id string) (workspace.Worksp
 // DeleteWorkspace removes a workspace.
 func (c *Client) DeleteWorkspace(ctx context.Context, id string) error {
 	return c.do(ctx, http.MethodDelete, "/v1/workspaces/"+id, nil, nil)
+}
+
+// PortInfo describes a TCP listener inside a workspace.
+type PortInfo struct {
+	Port    int    `json:"port"`
+	Address string `json:"address"`
+}
+
+// WorkspacePorts lists TCP ports listening inside a workspace.
+func (c *Client) WorkspacePorts(ctx context.Context, workspaceID string) ([]PortInfo, error) {
+	var response struct {
+		Ports []PortInfo `json:"ports"`
+	}
+	err := c.do(ctx, http.MethodGet, "/v1/workspaces/"+url.PathEscape(workspaceID)+"/ports", nil, &response)
+	return response.Ports, err
+}
+
+// Tunnel is a bidirectional byte stream to a workspace service. Bytes
+// written are forwarded to the service; bytes read arrive from it.
+type Tunnel struct {
+	body  io.ReadCloser
+	write io.WriteCloser
+}
+
+func (t *Tunnel) Read(b []byte) (int, error)  { return t.body.Read(b) }
+func (t *Tunnel) Write(b []byte) (int, error) { return t.write.Write(b) }
+
+// CloseWrite ends the client-to-service direction, like TCP half-close.
+func (t *Tunnel) CloseWrite() error { return t.write.Close() }
+
+// Close ends the tunnel in both directions.
+func (t *Tunnel) Close() error {
+	writeErr := t.write.Close()
+	bodyErr := t.body.Close()
+	if writeErr != nil {
+		return writeErr
+	}
+	return bodyErr
+}
+
+// Tunnel connects to one loopback port inside a workspace over the same
+// authenticated transport as every other API call. The request body streams
+// toward the service and the response body streams back.
+func (c *Client) Tunnel(ctx context.Context, workspaceID string, port int) (*Tunnel, error) {
+	reader, writer := io.Pipe()
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		fmt.Sprintf("%s/v1/workspaces/%s/tunnel/%d", c.baseURL, url.PathEscape(workspaceID), port), reader)
+	if err != nil {
+		_ = writer.Close()
+		return nil, fmt.Errorf("build tunnel request: %w", err)
+	}
+	request.Header.Set("Content-Type", "application/octet-stream")
+	request.Header.Set("Accept-Encoding", "identity")
+	if c.token != "" {
+		request.Header.Set("Authorization", "Bearer "+c.token)
+	}
+	response, err := c.stream.Do(request)
+	if err != nil {
+		_ = writer.Close()
+		return nil, fmt.Errorf("tunnel %s:%d: %w", workspaceID, port, err)
+	}
+	if response.StatusCode != http.StatusOK {
+		defer response.Body.Close()
+		_ = writer.Close()
+		code, message := "http_error", response.Status
+		var payload struct {
+			Error struct {
+				Code    string `json:"code"`
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		if json.NewDecoder(response.Body).Decode(&payload) == nil && payload.Error.Code != "" {
+			code, message = payload.Error.Code, payload.Error.Message
+		}
+		return nil, &Error{Status: response.StatusCode, Code: code, Message: message}
+	}
+	return &Tunnel{body: response.Body, write: writer}, nil
 }

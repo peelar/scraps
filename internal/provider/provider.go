@@ -3,6 +3,8 @@ package provider
 
 import (
 	"context"
+	"fmt"
+	"io"
 	"io/fs"
 
 	"github.com/peelar/scraps/internal/workspace"
@@ -62,13 +64,21 @@ type Provider interface {
 	ReadDir(context.Context, string, string) ([]string, error)
 	Glob(context.Context, string, GlobRequest) ([]string, error)
 	Grep(context.Context, string, GrepRequest) (GrepResult, error)
+
+	// Ports lists TCP ports listening inside a running workspace.
+	Ports(context.Context, string) ([]Port, error)
+	// Tunnel opens a byte stream to one loopback port inside the workspace.
+	// Tunnels are explicit, per-request, and reach only the workspace's own
+	// loopback interface; providers must never publish ports implicitly.
+	Tunnel(context.Context, string, int) (TunnelConn, error)
 }
 
 type ExecRequest struct {
 	Command string
 	CWD     string
-	// Env contains explicit per-command values. Providers must not augment it
-	// by inheriting the daemon's complete environment.
+	// Env contains only values explicitly approved by the authenticated client.
+	// Providers must add these to their minimal environment, never the daemon's
+	// ambient process environment.
 	Env map[string]string
 }
 
@@ -120,4 +130,28 @@ type GrepMatch struct {
 type GrepResult struct {
 	Matches      []GrepMatch `json:"matches"`
 	LimitReached bool        `json:"limitReached"`
+}
+
+// Port describes a TCP listener inside a workspace.
+type Port struct {
+	Port    int    `json:"port"`
+	Address string `json:"address"`
+}
+
+// TunnelConn is a live byte stream to one TCP port inside a workspace.
+type TunnelConn interface {
+	io.ReadWriteCloser
+	// CloseWrite signals that no more bytes will be sent, like a TCP
+	// half-close, so the tunneled service can observe client EOF.
+	CloseWrite() error
+}
+
+// TunnelDialError reports a workspace service that could not be reached.
+type TunnelDialError struct {
+	Port   int
+	Reason string
+}
+
+func (e *TunnelDialError) Error() string {
+	return fmt.Sprintf("dial 127.0.0.1:%d: %s", e.Port, e.Reason)
 }

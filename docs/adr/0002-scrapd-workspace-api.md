@@ -98,8 +98,10 @@ The response is `application/x-ndjson`, flushed per event:
 - `exit.code` is the process exit code, or `null` with `reason` `timeout` or
   `cancelled` when the process was killed.
 - **Client disconnect is the abort mechanism**: closing the request cancels
-  the server context, which kills the process group (`SIGKILL` on the process
-  group, since commands are started with `setpgid`). No stdin support in M1.
+  the server context. The provider must terminate the complete execution tree
+  using control state unavailable to workspace code. OpenShell does this by
+  stopping and restarting sandbox compute while retaining its persistent
+  workspace. No stdin support in M1.
 - Pre-execution failures (unknown workspace, invalid path, bad request) use
   the HTTP error shape, not events.
 

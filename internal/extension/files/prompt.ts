@@ -13,11 +13,19 @@ export type RemotePromptContext = {
 	readonly daemonUrl: string;
 	readonly root: string;
 	readonly status: string;
+	readonly loadedEnvironment: readonly string[];
+	readonly missingEnvironment: readonly string[];
 };
 
 /** The context block appended to the system prompt in remote mode. */
 export function remoteContextBlock(context: RemotePromptContext): string {
 	const project = context.project === undefined ? "unknown" : context.project;
+	const loaded = context.loadedEnvironment.length === 0
+		? "none"
+		: context.loadedEnvironment.join(", ");
+	const missing = context.missingEnvironment.length === 0
+		? "none"
+		: context.missingEnvironment.join(", ");
 	return [
 		"## Scraps remote workspace",
 		"",
@@ -32,6 +40,23 @@ export function remoteContextBlock(context: RemotePromptContext): string {
 		"All project-facing tools (bash, read, write, edit, ls, find, grep) execute",
 		"on the remote workspace, not on the local machine. Paths are interpreted",
 		"relative to the remote project root. The local filesystem is not accessible.",
+		"",
+		"Servers started inside the workspace are unreachable from the user's",
+		"browser. When one starts listening, tell the user they can preview it by",
+		"running `scrap open` in a local terminal.",
+		"",
+		"The user's ordinary local environment is deliberately not copied into the",
+		"workspace. Only explicitly approved variables that existed when Pi started",
+		"are available to commands:",
+		`- Approved and loaded: ${loaded}`,
+		`- Approved but missing at Pi startup: ${missing}`,
+		"If software explicitly reports that an environment variable is missing,",
+		"explain this boundary and ask the user to run `scrap env allow NAME` in a",
+		"local terminal, then restart Pi through their secret manager (for example,",
+		"`op run -- pi`, `doppler run -- pi`, or `infisical run -- pi`). Your bash",
+		"tool is remote, so do not try to run `scrap env` yourself. Never ask the user",
+		"to paste a secret into chat, and do not suggest approving unrelated variables.",
+		"Prefer a Scraps credential broker, such as `scrap auth github`, when one exists.",
 		"",
 		"If a tool reports that the Scraps workspace is unavailable, stop and tell",
 		"the user. Do not attempt to work around it: local fallback does not exist.",

@@ -117,6 +117,9 @@ func (s *Server) routes() http.Handler {
 
 	mux.HandleFunc("POST /v1/workspaces/{id}/exec", s.requireAuth(s.execCommand))
 
+	mux.HandleFunc("GET /v1/workspaces/{id}/ports", s.requireAuth(s.workspacePorts))
+	mux.HandleFunc("POST /v1/workspaces/{id}/tunnel/{port}", s.requireAuth(s.tunnel))
+
 	mux.HandleFunc("POST /v1/workspaces/{id}/files/read", s.requireAuth(s.fileRead))
 	mux.HandleFunc("POST /v1/workspaces/{id}/files/write", s.requireAuth(s.fileWrite))
 	mux.HandleFunc("POST /v1/workspaces/{id}/files/mkdir", s.requireAuth(s.fileMkdir))

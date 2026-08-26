@@ -1,0 +1,245 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SOURCE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck source=manifest.env
+source "$SOURCE/manifest.env"
+BUNDLE_VERSION=$(cat "$SOURCE/VERSION")
+[[ $BUNDLE_VERSION =~ ^[A-Za-z0-9_.-]+$ ]] || { echo "invalid bundle version: $BUNDLE_VERSION" >&2; exit 1; }
+RELEASE_DIR="/opt/scraps/releases/$BUNDLE_VERSION"
+ENV_FILE=/etc/scraps/scrapd.env
+WORKSPACE_IMAGE="$SCRAPS_WORKSPACE_IMAGE_REPOSITORY:$BUNDLE_VERSION"
+
+if [[ $EUID -ne 0 ]]; then echo "run this installer as root" >&2; exit 1; fi
+if [[ ! -r /etc/os-release ]]; then echo "Ubuntu or Debian is required" >&2; exit 1; fi
+# shellcheck source=/etc/os-release
+source /etc/os-release
+case "${ID:-}:${ID_LIKE:-}" in
+  ubuntu:*|debian:*|*:debian*) ;;
+  *) echo "unsupported OS: ${PRETTY_NAME:-unknown}; use Ubuntu 24.04 LTS or Debian 12" >&2; exit 1 ;;
+esac
+(cd "$SOURCE" && sha256sum -c SHA256SUMS)
+case "$(uname -m)" in x86_64) host_arch=amd64 ;; aarch64|arm64) host_arch=arm64 ;; *) host_arch=unsupported ;; esac
+[[ $(cat "$SOURCE/TARGET") == "linux/$host_arch" ]] || {
+  echo "bundle $(cat "$SOURCE/TARGET") cannot run on linux/$host_arch" >&2
+  exit 1
+}
+available_kib=$(df --output=avail / | tail -1 | tr -d ' ')
+[[ $available_kib =~ ^[0-9]+$ && $available_kib -ge 5242880 ]] || {
+  echo "at least 5 GiB free disk is required before provisioning" >&2
+  exit 1
+}
+
+export DEBIAN_FRONTEND=noninteractive
+apt-get update
+apt-get install -y --no-install-recommends age ca-certificates curl sqlite3 uidmap
+if ! command -v docker >/dev/null 2>&1; then
+  apt-get install -y --no-install-recommends docker.io
+fi
+systemctl enable --now docker.service
+docker_version=$(docker version --format '{{.Server.Version}}')
+docker_major=${docker_version%%.*}
+[[ $docker_major =~ ^[0-9]+$ && $docker_major -ge 28 ]] || {
+  echo "Docker Engine 28 or newer is required; found $docker_version" >&2
+  exit 1
+}
+install -d -m 0755 /etc/systemd/journald.conf.d
+cat >/etc/systemd/journald.conf.d/scraps-worker.conf <<'EOF'
+[Journal]
+SystemMaxUse=512M
+MaxRetentionSec=30day
+EOF
+systemctl restart systemd-journald.service
+
+if ! id "$SCRAPS_SERVICE_USER" >/dev/null 2>&1; then
+  useradd --create-home --shell /bin/bash --user-group "$SCRAPS_SERVICE_USER"
+fi
+usermod -aG docker "$SCRAPS_SERVICE_USER"
+loginctl enable-linger "$SCRAPS_SERVICE_USER"
+install -d -o root -g root -m 0755 /opt/scraps/releases
+install -d -o "$SCRAPS_SERVICE_USER" -g "$SCRAPS_SERVICE_USER" -m 0750 \
+  /var/lib/scraps "$SCRAPS_DATA_DIR" /var/lib/scraps/openshell /var/lib/scraps/openshell-data /var/lib/scraps/workspaces
+chown -R "$SCRAPS_SERVICE_USER:$SCRAPS_SERVICE_USER" /var/lib/scraps
+install -d -o root -g "$SCRAPS_SERVICE_USER" -m 0750 /etc/scraps
+install -d -o root -g root -m 0700 "$SCRAPS_BACKUP_ROOT"
+install -d -o root -g root -m 0755 "$RELEASE_DIR/bin"
+install -m 0755 "$SOURCE/bin/scrap" "$SOURCE/bin/scrapd" "$SOURCE/bin/scraps-worker" "$RELEASE_DIR/bin/"
+install -m 0644 "$SOURCE/manifest.env" "$SOURCE/VERSION" "$SOURCE/TARGET" "$RELEASE_DIR/"
+
+if [[ ! -e "$ENV_FILE" ]]; then
+  token=$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')
+  cat >"$ENV_FILE" <<EOF
+SCRAPD_LISTEN_ADDR=127.0.0.1:8484
+SCRAPD_DATA_DIR=$SCRAPS_DATA_DIR
+SCRAPD_OPENSHELL_IMAGE=$WORKSPACE_IMAGE
+SCRAPD_TOKEN=$token
+EOF
+  echo "Created $ENV_FILE; copy SCRAPD_TOKEN securely to authorized clients."
+fi
+chmod 0640 "$ENV_FILE"
+chown root:"$SCRAPS_SERVICE_USER" "$ENV_FILE"
+
+install -d -o "$SCRAPS_SERVICE_USER" -g "$SCRAPS_SERVICE_USER" -m 0755 /home/"$SCRAPS_SERVICE_USER"/.config/openshell
+install -d -o "$SCRAPS_SERVICE_USER" -g "$SCRAPS_SERVICE_USER" -m 0755 /home/"$SCRAPS_SERVICE_USER"/.local/state
+if [[ ! -e /home/"$SCRAPS_SERVICE_USER"/.local/state/openshell ]]; then
+  ln -s /var/lib/scraps/openshell /home/"$SCRAPS_SERVICE_USER"/.local/state/openshell
+fi
+install -d -o "$SCRAPS_SERVICE_USER" -g "$SCRAPS_SERVICE_USER" -m 0755 /home/"$SCRAPS_SERVICE_USER"/.local/share
+if [[ ! -e /home/"$SCRAPS_SERVICE_USER"/.local/share/openshell ]]; then
+  ln -s /var/lib/scraps/openshell-data /home/"$SCRAPS_SERVICE_USER"/.local/share/openshell
+fi
+if ! docker network inspect openshell-scraps >/dev/null 2>&1; then
+  docker network create --driver bridge openshell-scraps >/dev/null
+fi
+openshell_bridge_gateway=$(docker network inspect openshell-scraps --format '{{(index .IPAM.Config 0).Gateway}}')
+[[ $openshell_bridge_gateway =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+  echo "could not resolve the OpenShell Docker bridge gateway" >&2
+  exit 1
+}
+gateway_config=/home/"$SCRAPS_SERVICE_USER"/.config/openshell/gateway.toml
+new_gateway_config=$(mktemp)
+cat >"$new_gateway_config" <<EOF
+[openshell]
+version = 1
+
+[openshell.gateway]
+compute_drivers = ["docker"]
+bind_address = "127.0.0.1:17670"
+
+[openshell.drivers.docker]
+socket_path = "/var/run/docker.sock"
+network_name = "openshell-scraps"
+host_gateway_ip = "$openshell_bridge_gateway"
+EOF
+gateway_config_changed=false
+if [[ ! -e $gateway_config ]] || ! cmp -s "$new_gateway_config" "$gateway_config"; then
+  install -o "$SCRAPS_SERVICE_USER" -g "$SCRAPS_SERVICE_USER" -m 0644 "$new_gateway_config" "$gateway_config"
+  gateway_config_changed=true
+fi
+rm -f -- "$new_gateway_config"
+chown -R "$SCRAPS_SERVICE_USER:$SCRAPS_SERVICE_USER" /home/"$SCRAPS_SERVICE_USER"/.config
+
+service_uid=$(id -u "$SCRAPS_SERVICE_USER")
+as_service() {
+  runuser -u "$SCRAPS_SERVICE_USER" -- env HOME=/home/"$SCRAPS_SERVICE_USER" \
+    XDG_RUNTIME_DIR=/run/user/"$service_uid" DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/"$service_uid"/bus \
+    PATH="$RELEASE_DIR/bin":/home/"$SCRAPS_SERVICE_USER"/.local/bin:/usr/local/bin:/usr/bin:/bin "$@"
+}
+as_service "$RELEASE_DIR/bin/scrap" _worker-setup --image "$WORKSPACE_IMAGE"
+as_service systemctl --user daemon-reload
+as_service systemctl --user enable openshell-gateway.service >/dev/null
+if [[ $gateway_config_changed == true ]] || ! as_service systemctl --user is-active --quiet openshell-gateway.service; then
+  as_service systemctl --user restart openshell-gateway.service
+fi
+timeout 30 bash -c 'until ss -lnt | grep -q "127.0.0.1:17670"; do sleep 1; done'
+as_service openshell gateway remove openshell >/dev/null 2>&1 || true
+as_service openshell gateway add https://127.0.0.1:17670 --local --name openshell >/dev/null
+as_service openshell gateway select openshell >/dev/null
+as_service openshell status >/dev/null
+
+# Activate only after provisioning the new version succeeds. Point new
+# workspaces at its image while retaining the prior tag for rollback, and
+# preserve the independently managed bearer token.
+updated_env=$(mktemp /etc/scraps/scrapd.env.XXXXXX)
+found_image=false
+while IFS= read -r line; do
+  if [[ $line == SCRAPD_OPENSHELL_IMAGE=* ]]; then
+    printf 'SCRAPD_OPENSHELL_IMAGE=%s\n' "$WORKSPACE_IMAGE"
+    found_image=true
+  else
+    printf '%s\n' "$line"
+  fi
+done <"$ENV_FILE" >"$updated_env"
+if [[ $found_image == false ]]; then printf 'SCRAPD_OPENSHELL_IMAGE=%s\n' "$WORKSPACE_IMAGE" >>"$updated_env"; fi
+chown root:"$SCRAPS_SERVICE_USER" "$updated_env"
+chmod 0640 "$updated_env"
+mv "$updated_env" "$ENV_FILE"
+ln -sfn "$RELEASE_DIR" /opt/scraps/current
+ln -sfn /opt/scraps/current/bin/scrap /usr/local/bin/scrap
+ln -sfn /opt/scraps/current/bin/scraps-worker /usr/local/bin/scraps-worker
+
+cat >/etc/systemd/system/scrapd.service <<EOF
+[Unit]
+Description=Scraps workspace daemon
+After=docker.service network-online.target
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+User=$SCRAPS_SERVICE_USER
+Group=$SCRAPS_SERVICE_USER
+Environment=HOME=/home/$SCRAPS_SERVICE_USER
+Environment=PATH=/opt/scraps/current/bin:/home/$SCRAPS_SERVICE_USER/.local/bin:/usr/local/bin:/usr/bin:/bin
+EnvironmentFile=$ENV_FILE
+ExecStart=/opt/scraps/current/bin/scrapd
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/scraps /home/$SCRAPS_SERVICE_USER/.config/openshell
+
+[Install]
+WantedBy=multi-user.target
+EOF
+if [[ ! -e /etc/scraps/health.env ]]; then
+  cat >/etc/scraps/health.env <<'EOF'
+SCRAPS_DISK_WARN_PERCENT=80
+SCRAPS_RESTART_WARN_COUNT=3
+SCRAPS_BACKUP_MAX_AGE_HOURS=36
+# SCRAPS_ALERT_WEBHOOK=https://alerts.example.invalid/scraps
+EOF
+  chmod 0600 /etc/scraps/health.env
+fi
+cat >/etc/systemd/system/scraps-health.service <<'EOF'
+[Unit]
+Description=Scraps worker health and backup-age checks
+After=scrapd.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/scraps/health.env
+ExecStart=/usr/local/bin/scraps-worker healthcheck
+EOF
+cat >/etc/systemd/system/scraps-health.timer <<'EOF'
+[Unit]
+Description=Check Scraps worker health every five minutes
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=5min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+cat >/etc/systemd/system/scraps-backup.service <<'EOF'
+[Unit]
+Description=Create a consistent encrypted Scraps worker backup
+ConditionPathExists=/etc/scraps/backup.env
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/scraps/backup.env
+ExecStart=/usr/local/bin/scraps-worker backup
+EOF
+cat >/etc/systemd/system/scraps-backup.timer <<'EOF'
+[Unit]
+Description=Create a daily encrypted Scraps worker backup
+
+[Timer]
+OnCalendar=daily
+RandomizedDelaySec=2h
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+systemctl daemon-reload
+systemctl enable scrapd.service >/dev/null
+systemctl enable --now scraps-health.timer >/dev/null
+systemctl restart scrapd.service
+timeout 30 bash -c 'until curl -fsS http://127.0.0.1:8484/healthz >/dev/null; do sleep 1; done'
+echo "Scraps worker $BUNDLE_VERSION is ready on loopback. Run: scraps-worker diagnostics"

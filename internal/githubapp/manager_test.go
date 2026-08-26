@@ -55,6 +55,27 @@ func TestSignJWT(t *testing.T) {
 	}
 }
 
+func TestAuthorizationStateExpires(t *testing.T) {
+	manager, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+	state, _, err := manager.Start("https://scraps-worker.example.ts.net")
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.mu.Lock()
+	manager.flows[state].created = time.Now().Add(-21 * time.Minute)
+	manager.mu.Unlock()
+	if _, ok := manager.Status(state); ok {
+		t.Fatal("expired authorization state remained valid")
+	}
+	if _, err := manager.ManifestHTML(state); err == nil {
+		t.Fatal("expired authorization state opened a manifest")
+	}
+}
+
 func TestManifestInstallationConfiguresOpenShell(t *testing.T) {
 	_, privateKey := testPrivateKey(t)
 	github := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {

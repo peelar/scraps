@@ -39,6 +39,18 @@ archives:
 checksum:
   name_template: checksums.txt
 
+brews:
+  - name: scrap
+    repository:
+      owner: peelar
+      name: homebrew-tap
+    directory: Formula
+    homepage: https://github.com/peelar/scraps
+    description: Self-hosted agent workspaces that keep Pi local and give it a disposable remote dev computer
+    install: |
+      bin.install "scrap"
+      bin.install "scrapd"
+
 changelog:
   sort: asc
   filters:
@@ -47,4 +59,4 @@ changelog:
       - '^test:'
 
 release:
-  draft: true
+  draft: false

@@ -72,82 +72,39 @@ guest_arch() {
 
 build_bundle() {
   local stage=$1 arch=$2
-  mkdir -p "$stage/bin"
-  (cd "$ROOT" && CGO_ENABLED=0 GOOS=linux GOARCH="$arch" go build -trimpath -o "$stage/bin/scrap" ./cmd/scrap)
-  (cd "$ROOT" && CGO_ENABLED=0 GOOS=linux GOARCH="$arch" go build -trimpath -o "$stage/bin/scrapd" ./cmd/scrapd)
+  "$ROOT/scripts/build-worker-bundle" "$arch" "$stage/worker.tar.gz" >/dev/null
 }
 
 copy_bundle() {
   local stage=$1
-  COPYFILE_DISABLE=1 tar --no-xattrs -C "$stage" -czf - . | limactl shell "$VM_NAME" bash -c \
-    'rm -rf "$HOME/.cache/scraps/deploy.new"; mkdir -p "$HOME/.cache/scraps/deploy.new"; tar -xzf - -C "$HOME/.cache/scraps/deploy.new"; rm -rf "$HOME/.cache/scraps/deploy"; mv "$HOME/.cache/scraps/deploy.new" "$HOME/.cache/scraps/deploy"'
+  limactl copy "$stage/worker.tar.gz" "$VM_NAME:/tmp/scraps-worker.tar.gz"
 }
 
 deploy_guest() {
   limactl shell "$VM_NAME" bash -s <<'GUEST'
 set -euo pipefail
-cd "$HOME/.cache/scraps/deploy"
-mkdir -p "$HOME/.local/bin" "$HOME/.config/openshell"
-install -m 0755 bin/scrap bin/scrapd "$HOME/.local/bin/"
-export PATH="$HOME/.local/bin:$PATH"
-cat >"$HOME/.config/openshell/gateway.toml" <<EOF
-[openshell.gateway]
-compute_drivers = ["docker"]
-# Containers reach the gateway through the VM-side Docker bridge. Lima
-# publishes only scrapd:8484; its catch-all deny keeps this port off the host.
-bind_address = "0.0.0.0:17670"
-
-[openshell.drivers.docker]
-socket_path = "/var/run/docker.sock"
-EOF
-# Remove the compatibility override used by early rootless-VM prototypes.
-rm -f "$HOME/.config/systemd/user/openshell-gateway.service.d/rootless-docker.conf"
-systemctl --user daemon-reload
-# Lima's readiness probe runs only when the VM is first created. On resume,
-# Docker can still be starting while deployment begins.
-systemctl --user stop openshell-gateway.service 2>/dev/null || true
-if ! timeout 120 bash -c 'until docker info >/dev/null 2>&1; do sleep 2; done'; then
-  echo "scraps: Docker did not become ready" >&2
-  exit 1
+stage=$(mktemp -d)
+trap 'rm -rf -- "$stage" /tmp/scraps-worker.tar.gz' EXIT
+tar -xzf /tmp/scraps-worker.tar.gz -C "$stage"
+# Migrate the pre-bundle Lima deployment once. Stop both generations before
+# copying SQLite/WAL and OpenShell state so existing workspaces and GitHub App
+# configuration survive the service-user transition.
+sudo systemctl stop scrapd.service 2>/dev/null || true
+systemctl --user stop scrapd.service openshell-gateway.service 2>/dev/null || true
+sudo install -d -m 0750 /var/lib/scraps/scrapd /var/lib/scraps/openshell
+if ! sudo test -e /var/lib/scraps/.lima-user-migrated; then
+  [[ ! -d "$HOME/.config/scrapd" ]] || sudo cp -a "$HOME/.config/scrapd/." /var/lib/scraps/scrapd/
+  [[ ! -d "$HOME/.local/state/openshell" ]] || sudo cp -a "$HOME/.local/state/openshell/." /var/lib/scraps/openshell/
+  sudo touch /var/lib/scraps/.lima-user-migrated
 fi
-systemctl --user restart openshell-gateway.service
-# systemctl reports success before OpenShell has connected to Docker and bound
-# its API socket (and the first start may need to pull the supervisor image).
-if ! timeout 180 bash -c 'until openshell status >/dev/null 2>&1; do sleep 2; done'; then
-  echo "scraps: OpenShell gateway did not become ready" >&2
-  journalctl --user -u openshell-gateway.service -n 80 --no-pager >&2 || true
-  exit 1
-fi
-scrap _worker-setup
-mkdir -p "$HOME/.config/systemd/user"
-cat >"$HOME/.config/systemd/user/scrapd.service" <<'EOF'
-[Unit]
-Description=Scraps workspace daemon
-After=openshell-gateway.service
-Requires=openshell-gateway.service
-
-[Service]
-Type=simple
-Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
-ExecStart=%h/.local/bin/scrapd
-Restart=on-failure
-RestartSec=2
-
-[Install]
-WantedBy=default.target
-EOF
-systemctl --user daemon-reload
-systemctl --user enable scrapd.service >/dev/null
-# Migrate daemons started by older Scraps releases into the systemd service.
-systemctl --user stop scrapd.service 2>/dev/null || true
-pkill -x scrapd 2>/dev/null || true
-timeout 10 bash -c 'while pgrep -x scrapd >/dev/null; do sleep 1; done'
-systemctl --user start scrapd.service
-if ! timeout 30 bash -c 'until systemctl --user is-active --quiet scrapd.service && curl -fs http://127.0.0.1:8484/healthz >/dev/null 2>&1; do sleep 1; done'; then
-  echo "scraps: scrapd did not become ready" >&2
-  journalctl --user -u scrapd.service -n 80 --no-pager >&2 || true
-  exit 1
-fi
+systemctl --user disable scrapd.service openshell-gateway.service >/dev/null 2>&1 || true
+# The host-loopback-only Lima transport does not need a bearer token. Remote
+# workers let the installer generate one and must retain it with Tailscale ACLs.
+sudo install -d -m 0750 /etc/scraps
+printf '%s\n' 'SCRAPD_LISTEN_ADDR=127.0.0.1:8484' 'SCRAPD_DATA_DIR=/var/lib/scraps/scrapd' \
+  'SCRAPD_OPENSHELL_IMAGE=scraps-dev:bootstrap' 'SCRAPD_TOKEN=' | sudo tee /etc/scraps/scrapd.env >/dev/null
+sudo chmod 0640 /etc/scraps/scrapd.env
+sudo "$stage/install"
 GUEST
 }
 

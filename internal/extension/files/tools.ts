@@ -54,7 +54,11 @@ export const REMOTE_TOOL_NAMES = [
  * mid-session `/scrap-select` or late workspace discovery is picked up
  * without re-registering anything.
  */
-export function registerRemoteTools(pi: ExtensionAPI, session: WorkspaceSession): void {
+export function registerRemoteTools(
+	pi: ExtensionAPI,
+	session: WorkspaceSession,
+	approvedEnv: Readonly<Record<string, string>> = {},
+): void {
 	// Tools are (re)built per execution so a mid-session `/scrap-select` or
 	// late workspace discovery is picked up without re-registering anything.
 	const readTool = (cwd: string) => session.remoteMode
@@ -67,7 +71,7 @@ export function registerRemoteTools(pi: ExtensionAPI, session: WorkspaceSession)
 		? createEditTool(session.root, { operations: createRemoteEditOps(session) })
 		: createEditTool(cwd);
 	const bashTool = (cwd: string) => session.remoteMode
-		? createBashTool(session.root, { operations: createRemoteBashOps(session) })
+		? createBashTool(session.root, { operations: createRemoteBashOps(session, approvedEnv) })
 		: createBashTool(cwd);
 	const lsTool = (cwd: string) => session.remoteMode
 		? createLsTool(session.root, { operations: createRemoteLsOps(session) })

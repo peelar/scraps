@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+fail() { echo "worker deployment test: $*" >&2; exit 1; }
+
+for file in manifest.env install VERSION TARGET SHA256SUMS bin/scrap bin/scrapd bin/scraps-worker; do
+  case "$file" in VERSION|TARGET|SHA256SUMS|bin/*) continue ;; esac
+  [[ -e "$ROOT/deploy/worker/$file" ]] || fail "missing $file"
+done
+grep -q '^SCRAPS_BUNDLE_FORMAT=1$' "$ROOT/deploy/worker/manifest.env" || fail "bundle format is not pinned"
+grep -q '^SCRAPS_OPENSHELL_VERSION=v0.0.113$' "$ROOT/deploy/worker/manifest.env" || fail "OpenShell version drift"
+grep -q 'WORKSPACE_IMAGE=.*VERSION' "$ROOT/deploy/worker/install" || fail "workspace image is not bundle-versioned"
+if grep -q '^VERSION=' "$ROOT/deploy/worker/install"; then fail "bundle version collides with /etc/os-release VERSION"; fi
+grep -q '127.0.0.1:8484' "$ROOT/deploy/worker/install" || fail "scrapd is not loopback bound"
+grep -q 'loginctl enable-linger' "$ROOT/deploy/worker/install" || fail "service-user linger is missing"
+grep -q '\.local/state/openshell' "$ROOT/deploy/worker/install" || fail "OpenShell state is not durable"
+grep -q '\.local/share/openshell' "$ROOT/deploy/worker/install" || fail "OpenShell driver data is not durable"
+grep -q '^version = 1$' "$ROOT/deploy/worker/install" || fail "OpenShell config schema is not pinned"
+grep -q 'SCRAPD_TOKEN=' "$ROOT/deploy/worker/install" || fail "token generation is missing"
+grep -q 'if ! command -v docker' "$ROOT/deploy/worker/install" || fail "installer would replace an existing Docker distribution"
+grep -q 'SystemMaxUse=512M' "$ROOT/deploy/worker/install" || fail "journal rotation is not configured"
+grep -q 'scraps-health.timer' "$ROOT/deploy/worker/install" || fail "health monitoring timer is not installed"
+grep -q 'scraps-backup.timer' "$ROOT/deploy/worker/install" || fail "encrypted backup timer is not installed"
+grep -q 'no encrypted application backup exists' "$ROOT/deploy/worker/scraps-worker" || fail "backup-age alert is missing"
+if grep -q 'installPiExtension' "$ROOT/cmd/scrap/setup.go"; then fail "worker setup installs the local Pi extension"; fi
+if grep -Eq '0\.0\.0\.0:(8484|17670)' "$ROOT/deploy/worker/install"; then fail "control-plane listener exposed on all interfaces"; fi
+grep -q 'scripts/build-worker-bundle' "$ROOT/scripts/worker-vm" || fail "Lima bypasses generic bundle"
+grep -q 'sudo "$stage/install"' "$ROOT/scripts/worker-vm" || fail "Lima bypasses generic installer"
+grep -q '.lima-user-migrated' "$ROOT/scripts/worker-vm" || fail "Lima user-state migration is missing"
+grep -q 'gateway add https://127.0.0.1:17670' "$ROOT/deploy/worker/install" || fail "OpenShell gateway is not explicitly registered"
+grep -q 'host_gateway_ip = "\$openshell_bridge_gateway"' "$ROOT/deploy/worker/install" || fail "sandbox callback bridge is not explicit"
+bash -n "$ROOT/scripts/deploy-worker" "$ROOT/scripts/configure-remote-client" "$ROOT/scripts/homelab-smoke" "$ROOT/scripts/worker-acceptance"
+grep -q 'client.json' "$ROOT/scripts/configure-remote-client" || fail "remote client profile is not persisted"
+grep -q 'sudo -n bash -s' "$ROOT/scripts/configure-remote-client" || fail "remote client bootstrap does not require noninteractive sudo"
+grep -q 'Existing Scraps worker detected' "$ROOT/scripts/deploy-worker" || fail "remote deploy does not detect upgrades"
+grep -q 'scraps-worker upgrade' "$ROOT/scripts/deploy-worker" || fail "remote deploy bypasses guarded upgrade"
+grep -q 'scraps-backup.service' "$ROOT/scripts/deploy-worker" || fail "remote deploy omits configured pre-upgrade backup"
+echo "worker deployment contract: ok"

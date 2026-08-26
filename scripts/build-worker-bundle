@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+ARCH=${1:-}
+OUTPUT=${2:-}
+VERSION=${SCRAPS_VERSION:-$(git -C "$ROOT" describe --tags --always --dirty 2>/dev/null || echo dev)}
+if [[ $VERSION == *-dirty ]]; then
+  dirty_hash=$(
+    cd "$ROOT"
+    {
+      git diff --binary HEAD
+      git ls-files --others --exclude-standard -z | while IFS= read -r -d '' file; do
+        printf '%s\0%s\n' "$file" "$(git hash-object "$file")"
+      done
+    } | git hash-object --stdin | cut -c1-12
+  )
+  VERSION="$VERSION.$dirty_hash"
+fi
+
+case "$ARCH" in
+  amd64|arm64) ;;
+  *) echo "usage: scripts/build-worker-bundle <amd64|arm64> [output.tar.gz]" >&2; exit 2 ;;
+esac
+OUTPUT=${OUTPUT:-"$ROOT/dist/scraps-worker_${VERSION}_linux_${ARCH}.tar.gz"}
+STAGE=$(mktemp -d)
+trap 'rm -rf -- "$STAGE"' EXIT
+mkdir -p "$STAGE/bin" "$STAGE/deploy"
+
+for cmd in scrap scrapd; do
+  (cd "$ROOT" && CGO_ENABLED=0 GOOS=linux GOARCH="$ARCH" go build -trimpath \
+    -ldflags "-X github.com/peelar/scraps/internal/version.Version=$VERSION" \
+    -o "$STAGE/bin/$cmd" "./cmd/$cmd")
+done
+install -m 0644 "$ROOT/deploy/worker/manifest.env" "$STAGE/manifest.env"
+install -m 0755 "$ROOT/deploy/worker/install" "$STAGE/install"
+install -m 0755 "$ROOT/deploy/worker/scraps-worker" "$STAGE/bin/scraps-worker"
+printf '%s\n' "$VERSION" >"$STAGE/VERSION"
+printf 'linux/%s\n' "$ARCH" >"$STAGE/TARGET"
+(cd "$STAGE" && sha256sum bin/scrap bin/scrapd bin/scraps-worker manifest.env install VERSION TARGET >SHA256SUMS)
+mkdir -p "$(dirname "$OUTPUT")"
+COPYFILE_DISABLE=1 tar --no-xattrs -C "$STAGE" -czf "$OUTPUT" .
+echo "$OUTPUT"

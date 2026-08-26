@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+: "${SCRAP_DAEMON_URL:?set SCRAP_DAEMON_URL to the tailnet HTTPS worker URL}"
+: "${SCRAP_TOKEN:?set SCRAP_TOKEN to the worker bearer token}"
+base=${SCRAP_DAEMON_URL%/}
+started=$(date +%s)
+
+echo "health: $(curl --fail --silent --show-error "$base/healthz")"
+unauthorized=$(curl --silent --output /dev/null --write-out '%{http_code}' "$base/v1/info")
+[[ $unauthorized == 401 ]] || { echo "expected /v1/info without a token to return 401, got $unauthorized" >&2; exit 1; }
+# Feed the header through curl's standard input so the token is not visible in
+# the process argument list.
+authorized=$(printf 'header = "Authorization: Bearer %s"\n' "$SCRAP_TOKEN" | \
+  curl --config - --silent --output /dev/null --write-out '%{http_code}' "$base/v1/info")
+[[ $authorized == 200 ]] || { echo "expected authenticated /v1/info to return 200, got $authorized" >&2; exit 1; }
+scrap status
+elapsed=$(($(date +%s) - started))
+echo "remote transport/authentication smoke test passed in ${elapsed}s"
+echo "Continue with the interactive Pi acceptance loop in docs/homelab-nuc.md."

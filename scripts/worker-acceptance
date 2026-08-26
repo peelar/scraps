@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+BASE_URL=${SCRAP_DAEMON_URL:-http://127.0.0.1:8484}
+ITERATIONS=${1:-1}
+CONCURRENCY=${SCRAPS_ACCEPTANCE_CONCURRENCY:-2}
+
+[[ $ITERATIONS =~ ^[1-9][0-9]*$ ]] || { echo "iterations must be a positive integer" >&2; exit 2; }
+[[ $CONCURRENCY =~ ^[1-9][0-9]*$ ]] || { echo "SCRAPS_ACCEPTANCE_CONCURRENCY must be positive" >&2; exit 2; }
+command -v node >/dev/null || { echo "Node.js is required on the Pi/developer machine" >&2; exit 1; }
+
+run_one() {
+  node --experimental-strip-types "$ROOT/packages/pi-extension/scripts/integration.ts" "$BASE_URL"
+}
+
+if [[ -n ${SCRAP_TOKEN:-} ]]; then
+  "$ROOT/scripts/homelab-smoke"
+fi
+
+for ((iteration=1; iteration<=ITERATIONS; iteration++)); do
+  echo "acceptance iteration $iteration/$ITERATIONS ($CONCURRENCY concurrent workspaces)"
+  logs=$(mktemp -d)
+  pids=()
+  for ((worker=1; worker<=CONCURRENCY; worker++)); do
+    run_one >"$logs/worker-$worker.log" 2>&1 &
+    pids+=("$!")
+  done
+  failed=0
+  for ((worker=1; worker<=CONCURRENCY; worker++)); do
+    if ! wait "${pids[$((worker-1))]}"; then failed=1; fi
+    sed -n '1,240p' "$logs/worker-$worker.log"
+  done
+  rm -rf -- "$logs"
+  [[ $failed -eq 0 ]] || { echo "acceptance iteration $iteration failed" >&2; exit 1; }
+done
+
+echo "homelab acceptance loop passed"

@@ -79,7 +79,8 @@ The extension will:
   `ls`, `find`, and `grep`;
 - create, select, start, stop, and reconnect to workspaces through `scrapd`;
 - stream command output and propagate exit status, timeouts, aborts, working
-  directory, and environment additions;
+  directory, while excluding Pi's process environment except for exact names
+  explicitly approved in the user's local Scraps profile;
 - provide binary-safe file operations and preserve Pi's exact-match edit
   behavior;
 - add remote workspace context to the system prompt;
@@ -147,8 +148,9 @@ will be added separately.
 
 - Pi and model-provider credentials remain on the developer machine.
 - Project content and project-affecting execution remain in the Linux workspace.
-- Workspace secrets must be supplied through Scraps-controlled brokering rather
-  than copied wholesale from the local environment.
+- Workspace secrets should use Scraps-controlled brokering where available;
+  software that requires raw values may receive only exact environment names
+  explicitly approved by the user, never the local environment wholesale.
 - Any local repository inspection used to select or initialize a workspace must
   be minimal and visible.
 - A partially initialized or disconnected extension must not expose local tools

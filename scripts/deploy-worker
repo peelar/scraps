@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+REMOTE=${1:-}
+[[ -n $REMOTE ]] || { echo "usage: scripts/deploy-worker user@worker-host" >&2; exit 2; }
+SSH=(ssh)
+SCP=(scp)
+if [[ -n ${SCRAPS_SSH_CONFIG:-} ]]; then
+  SSH+=(-F "$SCRAPS_SSH_CONFIG")
+  SCP+=(-F "$SCRAPS_SSH_CONFIG")
+fi
+SSH+=(-o ForwardAgent=no -o ClearAllForwardings=yes)
+SCP+=(-o ForwardAgent=no -o ClearAllForwardings=yes)
+
+machine=$("${SSH[@]}" "$REMOTE" uname -m)
+case "$machine" in
+  x86_64) arch=amd64 ;;
+  aarch64|arm64) arch=arm64 ;;
+  *) echo "unsupported remote architecture: $machine" >&2; exit 1 ;;
+esac
+
+stage=$(mktemp -d)
+bundle="$stage/worker.tar.gz"
+"$ROOT/scripts/build-worker-bundle" "$arch" "$bundle" >/dev/null
+remote_bundle=$("${SSH[@]}" "$REMOTE" mktemp /tmp/scraps-worker.XXXXXX.tar.gz)
+cleanup() {
+  "${SSH[@]}" "$REMOTE" rm -f -- "$remote_bundle" >/dev/null 2>&1 || true
+  rm -rf -- "$stage"
+}
+trap cleanup EXIT
+
+echo "Uploading linux/$arch worker bundle to $REMOTE..."
+"${SCP[@]}" "$bundle" "$REMOTE:$remote_bundle"
+"${SSH[@]}" -t "$REMOTE" "set -euo pipefail
+if sudo test -x /usr/local/bin/scraps-worker && sudo test -L /opt/scraps/current; then
+  echo 'Existing Scraps worker detected; deploying as an upgrade.'
+  if sudo test -r /etc/scraps/backup.env; then
+    echo 'Creating configured encrypted pre-upgrade backup...'
+    sudo systemctl --wait start scraps-backup.service
+  else
+    echo 'Encrypted backups are not configured; continuing without a pre-upgrade backup.' >&2
+  fi
+  sudo scraps-worker upgrade '$remote_bundle'
+else
+  echo 'No Scraps worker detected; performing initial installation.'
+  stage=\$(mktemp -d)
+  trap 'rm -rf -- \"\$stage\"' EXIT
+  tar -xzf '$remote_bundle' -C \"\$stage\"
+  sudo \"\$stage/install\"
+fi
+sudo scraps-worker diagnostics"
+echo "Worker deployment complete."
+echo "For first-time Tailscale publication and client setup, continue in docs/homelab-nuc.md."
+echo "After configuring the client, run: make homelab-acceptance"
