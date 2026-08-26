@@ -38,7 +38,8 @@ function makeFakeClient(): {
 		id: "quiet-river",
 		project: "owner/project",
 		state: "running",
-		rootPath: "/srv/workspaces/quiet-river",
+		rootPath: "/workspace",
+		pathContract: "workspace-relative-v1",
 	};
 
 	const client = Object.assign(Object.create(ScrapdClient.prototype), {
@@ -98,11 +99,11 @@ function makeSession(client: ScrapdClient): WorkspaceSession {
 describe("remote edit operations (exact-match preserved)", () => {
 	it("applies an exact-match edit through Pi's own edit tool remotely", async () => {
 		const fake = makeFakeClient();
-		fake.files.set("/srv/workspaces/quiet-river/src/app.ts", Buffer.from("const x = 1;\n"));
+		fake.files.set("/workspace/src/app.ts", Buffer.from("const x = 1;\n"));
 		const session = makeSession(fake.client);
 		await session.connect();
 
-		const edit = createEditTool("/srv/workspaces/quiet-river", {
+		const edit = createEditTool("/workspace", {
 			operations: createRemoteEditOps(session),
 		});
 
@@ -117,18 +118,18 @@ describe("remote edit operations (exact-match preserved)", () => {
 		);
 
 		assert.equal(
-			fake.files.get("/srv/workspaces/quiet-river/src/app.ts")?.toString("utf8"),
+			fake.files.get("/workspace/src/app.ts")?.toString("utf8"),
 			"const x = 2;\n",
 		);
 	});
 
 	it("rejects a non-matching edit like the local tool", async () => {
 		const fake = makeFakeClient();
-		fake.files.set("/srv/workspaces/quiet-river/src/app.ts", Buffer.from("const x = 1;\n"));
+		fake.files.set("/workspace/src/app.ts", Buffer.from("const x = 1;\n"));
 		const session = makeSession(fake.client);
 		await session.connect();
 
-		const edit = createEditTool("/srv/workspaces/quiet-river", {
+		const edit = createEditTool("/workspace", {
 			operations: createRemoteEditOps(session),
 		});
 
@@ -144,7 +145,7 @@ describe("remote edit operations (exact-match preserved)", () => {
 			),
 		);
 		assert.equal(
-			fake.files.get("/srv/workspaces/quiet-river/src/app.ts")?.toString("utf8"),
+			fake.files.get("/workspace/src/app.ts")?.toString("utf8"),
 			"const x = 1;\n",
 		);
 	});
@@ -157,8 +158,8 @@ describe("remote read/write transport", () => {
 		await session.connect();
 
 		const ops = createRemoteEditOps(session);
-		await ops.writeFile("/srv/workspaces/quiet-river/notes.txt", "héllo scraps\n");
-		const readBack = await ops.readFile("/srv/workspaces/quiet-river/notes.txt");
+		await ops.writeFile("/workspace/notes.txt", "héllo scraps\n");
+		const readBack = await ops.readFile("/workspace/notes.txt");
 
 		assert.equal(readBack.toString("utf8"), "héllo scraps\n");
 	});
@@ -167,35 +168,35 @@ describe("remote read/write transport", () => {
 describe("remote ls operations", () => {
 	it("lists entries through the client", async () => {
 		const fake = makeFakeClient();
-		fake.statResults.set("/srv/workspaces/quiet-river/src", {
+		fake.statResults.set("/workspace/src", {
 			exists: true,
 			isDirectory: true,
 			size: 0,
 			mode: "drwxr-xr-x",
 			modTimeMs: 0,
 		});
-		fake.statResults.set("/srv/workspaces/quiet-river/package.json", {
+		fake.statResults.set("/workspace/package.json", {
 			exists: true,
 			isDirectory: false,
 			size: 42,
 			mode: "-rw-r--r--",
 			modTimeMs: 0,
 		});
-		fake.statResults.set("/srv/workspaces/quiet-river", {
+		fake.statResults.set("/workspace", {
 			exists: true,
 			isDirectory: true,
 			size: 0,
 			mode: "drwxr-xr-x",
 			modTimeMs: 0,
 		});
-		fake.statResults.set("/srv/workspaces/quiet-river/src", {
+		fake.statResults.set("/workspace/src", {
 			exists: true,
 			isDirectory: true,
 			size: 0,
 			mode: "drwxr-xr-x",
 			modTimeMs: 0,
 		});
-		fake.statResults.set("/srv/workspaces/quiet-river/package.json", {
+		fake.statResults.set("/workspace/package.json", {
 			exists: true,
 			isDirectory: false,
 			size: 42,
@@ -205,7 +206,7 @@ describe("remote ls operations", () => {
 		const session = makeSession(fake.client);
 		await session.connect();
 
-		const ls = createLsTool("/srv/workspaces/quiet-river", {
+		const ls = createLsTool("/workspace", {
 			operations: createRemoteLsOps(session),
 		});
 		const result = await ls.execute("call-1", { path: "." }, undefined, undefined);
@@ -225,13 +226,13 @@ describe("remote grep (daemon search endpoint)", () => {
 		fake.grepResult = {
 			matches: [
 				{
-					path: "/srv/workspaces/quiet-river/src/a.ts",
+					path: "/workspace/src/a.ts",
 					lineNumber: 1,
 					lineText: "hello",
 					lines: [],
 				},
 				{
-					path: "/srv/workspaces/quiet-river/src/b.ts",
+					path: "/workspace/src/b.ts",
 					lineNumber: 7,
 					lineText: "hello",
 					lines: [],
@@ -253,7 +254,7 @@ describe("remote grep (daemon search endpoint)", () => {
 		fake.grepResult = {
 			matches: [
 				{
-					path: "/srv/workspaces/quiet-river/src/a.ts",
+					path: "/workspace/src/a.ts",
 					lineNumber: 3,
 					lineText: "match",
 					lines: [
@@ -286,8 +287,8 @@ describe("remote grep (daemon search endpoint)", () => {
 		const fake = makeFakeClient();
 		fake.grepResult = {
 			matches: [
-				{ path: "/srv/workspaces/quiet-river/a", lineNumber: 1, lineText: "x", lines: [] },
-				{ path: "/srv/workspaces/quiet-river/b", lineNumber: 1, lineText: "x", lines: [] },
+				{ path: "/workspace/a", lineNumber: 1, lineText: "x", lines: [] },
+				{ path: "/workspace/b", lineNumber: 1, lineText: "x", lines: [] },
 			],
 			limitReached: true,
 		};
@@ -304,16 +305,16 @@ describe("remote grep (daemon search endpoint)", () => {
 
 describe("path rendering", () => {
 	it("renders workspace paths relative to the root", () => {
-		assert.equal(relativeToRoot("/srv/workspaces/ws-1/src/a.ts", "/srv/workspaces/ws-1"), "src/a.ts");
-		assert.equal(relativeToRoot("/elsewhere/a.ts", "/srv/workspaces/ws-1"), "/elsewhere/a.ts");
+		assert.equal(relativeToRoot("/workspace/src/a.ts", "/workspace"), "src/a.ts");
+		assert.equal(relativeToRoot("/elsewhere/a.ts", "/workspace"), "/elsewhere/a.ts");
 	});
 
 	it("resolves relative grep paths against the workspace root", () => {
 		const { resolveRemotePath } = operations;
-		assert.equal(resolveRemotePath(undefined, "/srv/workspaces/ws-1"), "/srv/workspaces/ws-1");
-		assert.equal(resolveRemotePath(".", "/srv/workspaces/ws-1"), "/srv/workspaces/ws-1");
-		assert.equal(resolveRemotePath("src", "/srv/workspaces/ws-1"), "/srv/workspaces/ws-1/src");
-		assert.equal(resolveRemotePath("/abs", "/srv/workspaces/ws-1"), "/abs");
+		assert.equal(resolveRemotePath(undefined, "/workspace"), "/workspace");
+		assert.equal(resolveRemotePath(".", "/workspace"), "/workspace");
+		assert.equal(resolveRemotePath("src", "/workspace"), "/workspace/src");
+		assert.equal(resolveRemotePath("/abs", "/workspace"), "/abs");
 	});
 });
 
@@ -325,7 +326,7 @@ describe("fail-closed gate", () => {
 		await assert.rejects(() => runRemoteGrep(session, { pattern: "x" }), ScrapsUnavailableError);
 		const ops = createRemoteEditOps(session);
 		await assert.rejects(
-			() => ops.readFile("/srv/workspaces/quiet-river/src/app.ts"),
+			() => ops.readFile("/workspace/src/app.ts"),
 			ScrapsUnavailableError,
 		);
 	});

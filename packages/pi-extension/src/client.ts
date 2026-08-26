@@ -8,8 +8,8 @@
  * - If a token is configured, every request carries
  *   `Authorization: Bearer <token>`.
  * - Errors are `{ "error": { "code": "...", "message": "..." } }`.
- * - File paths are absolute paths on the workspace host; the workspace
- *   `rootPath` from the daemon defines the path space for Pi's tools.
+ * - File and cwd request paths are workspace-relative. The stable
+ *   agent-visible root is `/workspace`; provider host paths never cross API.
  *
  * `exec` responses are newline-delimited JSON events:
  *
@@ -30,8 +30,10 @@ export type WorkspaceRecord = {
 	readonly repoUrl?: string;
 	/** Lifecycle state; the directory provider always reports "running". */
 	readonly state: string;
-	/** Absolute project root on the workspace host. */
+	/** Stable agent-visible root; currently always `/workspace`. */
 	readonly rootPath?: string;
+	/** Versioned path contract required by this extension. */
+	readonly pathContract?: string;
 	readonly createdAt?: string;
 	readonly updatedAt?: string;
 };
@@ -103,6 +105,19 @@ type ExecEvent =
 type ExitEvent = Extract<ExecEvent, { type: "exit" }>;
 
 export const DEFAULT_DAEMON_URL = "http://127.0.0.1:8484";
+export const VIRTUAL_WORKSPACE_ROOT = "/workspace";
+export const REQUIRED_PATH_CONTRACT = "workspace-relative-v1";
+
+/** Translate stable agent-visible paths to the provider-neutral API space. */
+export function workspaceRelativePath(path: string): string {
+	if (path === "" || path === "." || path === VIRTUAL_WORKSPACE_ROOT || path === `${VIRTUAL_WORKSPACE_ROOT}/`) {
+		return ".";
+	}
+	const prefix = `${VIRTUAL_WORKSPACE_ROOT}/`;
+	if (path.startsWith(prefix)) return path.slice(prefix.length);
+	if (path.startsWith("/")) throw new Error(`path is outside ${VIRTUAL_WORKSPACE_ROOT}: ${path}`);
+	return path;
+}
 
 export class ScrapdClient {
 	private readonly baseUrl: string;
@@ -159,7 +174,7 @@ export class ScrapdClient {
 			`/v1/workspaces/${encodeURIComponent(id)}/exec`,
 			{
 				command,
-				cwd,
+				cwd: workspaceRelativePath(cwd),
 				...(options.timeout === undefined ? {} : { timeoutMs: options.timeout * 1000 }),
 				...envRecord(options.env),
 			},
@@ -220,36 +235,36 @@ export class ScrapdClient {
 		const body = await this.json<{ content: string }>(
 			"POST",
 			this.filesRoute(id, "read"),
-			{ path },
+			{ path: workspaceRelativePath(path) },
 		);
 		return Buffer.from(body.content, "base64");
 	}
 
 	async writeFile(id: string, path: string, content: string | Buffer): Promise<void> {
 		await this.request("POST", this.filesRoute(id, "write"), {
-			path,
+			path: workspaceRelativePath(path),
 			content: Buffer.from(content).toString("base64"),
 		});
 	}
 
 	async mkdir(id: string, path: string): Promise<void> {
-		await this.request("POST", this.filesRoute(id, "mkdir"), { path });
+		await this.request("POST", this.filesRoute(id, "mkdir"), { path: workspaceRelativePath(path) });
 	}
 
 	/** Throws ScrapdApiError when the path is missing or not accessible. */
 	async access(id: string, path: string, want: "read" | "write" = "read"): Promise<void> {
-		await this.request("POST", this.filesRoute(id, "access"), { path, want });
+		await this.request("POST", this.filesRoute(id, "access"), { path: workspaceRelativePath(path), want });
 	}
 
 	async stat(id: string, path: string): Promise<FileStat> {
-		return this.json("POST", this.filesRoute(id, "stat"), { path });
+		return this.json("POST", this.filesRoute(id, "stat"), { path: workspaceRelativePath(path) });
 	}
 
 	async readdir(id: string, path: string): Promise<string[]> {
 		const body = await this.json<{ entries?: string[] }>(
 			"POST",
 			this.filesRoute(id, "readdir"),
-			{ path },
+			{ path: workspaceRelativePath(path) },
 		);
 		return body.entries ?? [];
 	}
@@ -257,7 +272,7 @@ export class ScrapdClient {
 	async glob(id: string, input: GlobInput): Promise<string[]> {
 		const body = await this.json<{ paths?: string[] }>("POST", this.filesRoute(id, "glob"), {
 			pattern: input.pattern,
-			...(input.path === undefined ? {} : { path: input.path }),
+			...(input.path === undefined ? {} : { path: workspaceRelativePath(input.path) }),
 			...(input.limit === undefined ? {} : { limit: input.limit }),
 		});
 		return body.paths ?? [];
@@ -266,7 +281,7 @@ export class ScrapdClient {
 	async grep(id: string, input: GrepInput): Promise<GrepResult> {
 		return this.json("POST", this.filesRoute(id, "grep"), {
 			pattern: input.pattern,
-			...(input.path === undefined ? {} : { path: input.path }),
+			...(input.path === undefined ? {} : { path: workspaceRelativePath(input.path) }),
 			...(input.glob === undefined ? {} : { glob: input.glob }),
 			...(input.ignoreCase === undefined ? {} : { ignoreCase: input.ignoreCase }),
 			...(input.literal === undefined ? {} : { literal: input.literal }),

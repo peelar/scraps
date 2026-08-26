@@ -81,26 +81,34 @@ func NewManager(store *store.Store, dataDir string) (*Manager, error) {
 // Root returns the absolute workspaces root path.
 func (m *Manager) Root() string { return m.root }
 
+// VirtualRoot is the stable agent-visible root for every provider.
+const VirtualRoot = "/workspace"
+
+// PathContract identifies the workspace-relative v2 path contract.
+const PathContract = "workspace-relative-v1"
+
 // Workspace is the API-facing workspace record.
 type Workspace struct {
-	ID        string    `json:"id"`
-	Project   string    `json:"project"`
-	RepoURL   string    `json:"repoUrl"`
-	State     string    `json:"state"`
-	RootPath  string    `json:"rootPath"`
-	CreatedAt time.Time `json:"createdAt"`
-	UpdatedAt time.Time `json:"updatedAt"`
+	ID           string    `json:"id"`
+	Project      string    `json:"project"`
+	RepoURL      string    `json:"repoUrl"`
+	State        string    `json:"state"`
+	RootPath     string    `json:"rootPath"`
+	PathContract string    `json:"pathContract"`
+	CreatedAt    time.Time `json:"createdAt"`
+	UpdatedAt    time.Time `json:"updatedAt"`
 }
 
-func fromStore(root string, w store.Workspace) Workspace {
+func fromStore(w store.Workspace) Workspace {
 	return Workspace{
-		ID:        w.ID,
-		Project:   w.Project,
-		RepoURL:   w.RepoURL,
-		State:     w.State,
-		RootPath:  filepath.Join(root, w.ID),
-		CreatedAt: w.CreatedAt,
-		UpdatedAt: w.UpdatedAt,
+		ID:           w.ID,
+		Project:      w.Project,
+		RepoURL:      w.RepoURL,
+		State:        w.State,
+		RootPath:     VirtualRoot,
+		PathContract: PathContract,
+		CreatedAt:    w.CreatedAt,
+		UpdatedAt:    w.UpdatedAt,
 	}
 }
 
@@ -155,7 +163,7 @@ func (m *Manager) Create(ctx context.Context, options CreateOptions) (Workspace,
 		if err != nil {
 			return Workspace{}, err
 		}
-		return fromStore(m.root, saved), nil
+		return fromStore(saved), nil
 	}
 	return Workspace{}, errors.New("could not generate a unique workspace id")
 }
@@ -194,7 +202,7 @@ func (m *Manager) Get(ctx context.Context, id string) (Workspace, error) {
 	if err != nil {
 		return Workspace{}, err
 	}
-	return fromStore(m.root, record), nil
+	return fromStore(record), nil
 }
 
 // List returns all workspaces.
@@ -205,7 +213,7 @@ func (m *Manager) List(ctx context.Context) ([]Workspace, error) {
 	}
 	workspaces := make([]Workspace, len(records))
 	for i, record := range records {
-		workspaces[i] = fromStore(m.root, record)
+		workspaces[i] = fromStore(record)
 	}
 	return workspaces, nil
 }
@@ -224,9 +232,9 @@ func (m *Manager) Delete(ctx context.Context, id string) error {
 // ErrOutsideRoot is returned for paths that escape the workspace root.
 var ErrOutsideRoot = errors.New("path resolves outside the workspace root")
 
-// ResolvePath validates that an absolute path stays inside the workspace
-// root and returns the cleaned host path. Symlinks of existing components
-// are evaluated; the workspace root itself is resolved once at startup.
+// ResolvePath validates a workspace-relative API path and returns its host
+// path. Absolute paths are rejected so provider layout can never leak into
+// or be inferred by clients. Symlinks of existing components are evaluated.
 func (m *Manager) ResolvePath(id, path string) (string, error) {
 	root := filepath.Join(m.root, id)
 	resolvedRoot, err := filepath.EvalSymlinks(root)
@@ -234,14 +242,15 @@ func (m *Manager) ResolvePath(id, path string) (string, error) {
 		return "", fmt.Errorf("resolve workspace root: %w", err)
 	}
 
-	if !filepath.IsAbs(path) {
-		return "", fmt.Errorf("%w: %q is not absolute", ErrOutsideRoot, path)
+	if filepath.IsAbs(path) {
+		return "", fmt.Errorf("%w: %q must be workspace-relative", ErrOutsideRoot, path)
 	}
-	root = resolvedRoot
-	clean := filepath.Clean(path)
-	if !withinRoot(clean, root) {
+	cleanRelative := filepath.Clean(path)
+	if cleanRelative == ".." || strings.HasPrefix(cleanRelative, ".."+string(filepath.Separator)) {
 		return "", fmt.Errorf("%w: %q", ErrOutsideRoot, path)
 	}
+	root = resolvedRoot
+	clean := filepath.Join(root, cleanRelative)
 
 	// Resolve the deepest existing component so symlinked directories are
 	// caught even when the final path does not exist yet (write tool).

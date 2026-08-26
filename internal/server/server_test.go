@@ -21,6 +21,16 @@ import (
 type testServer struct {
 	*Server
 	handler http.Handler
+	dataDir string
+}
+
+func (ts *testServer) hostRoot(t *testing.T, id string) string {
+	t.Helper()
+	root, err := filepath.EvalSymlinks(filepath.Join(ts.dataDir, "workspaces", id))
+	if err != nil {
+		t.Fatalf("resolve test workspace root: %v", err)
+	}
+	return root
 }
 
 func newTestServer(t *testing.T) *testServer {
@@ -30,12 +40,13 @@ func newTestServer(t *testing.T) *testServer {
 
 func newTestServerWithToken(t *testing.T, token string) *testServer {
 	t.Helper()
-	server, err := New(Config{DataDir: t.TempDir(), Token: token})
+	dataDir := t.TempDir()
+	server, err := New(Config{DataDir: dataDir, Token: token})
 	if err != nil {
 		t.Fatalf("new server: %v", err)
 	}
 	t.Cleanup(server.Close)
-	return &testServer{Server: server, handler: server.Handler()}
+	return &testServer{Server: server, handler: server.Handler(), dataDir: dataDir}
 }
 
 func (ts *testServer) do(t *testing.T, method, target string, body any, token string) *httptest.ResponseRecorder {
@@ -153,7 +164,7 @@ func TestWorkspaceLifecycle(t *testing.T) {
 	ts := newTestServer(t)
 
 	created := ts.createWorkspace(t, workspace.CreateOptions{Project: "demo"})
-	if created.ID == "" || created.State != "running" || created.RootPath == "" {
+	if created.ID == "" || created.State != "running" || created.RootPath != "/workspace" || created.PathContract != "workspace-relative-v1" {
 		t.Fatalf("created = %+v", created)
 	}
 
@@ -253,6 +264,23 @@ func TestExecStreamsOutputAndExitCode(t *testing.T) {
 	}
 }
 
+func TestExecUsesVirtualWorkspaceRoot(t *testing.T) {
+	ts := newTestServer(t)
+	created := ts.createWorkspace(t, workspace.CreateOptions{})
+
+	events := runExec(t, ts, created.ID, map[string]any{
+		"command": "pwd; test -d /workspace; echo /workspace/file.txt",
+		"cwd":     ".",
+	})
+	output := execOutput(events)
+	if output != "/workspace\n/workspace/file.txt\n" {
+		t.Fatalf("virtualized output = %q", output)
+	}
+	if strings.Contains(output, ts.dataDir) {
+		t.Fatalf("output leaked host data directory: %q", output)
+	}
+}
+
 func TestExecTimeoutKillsProcess(t *testing.T) {
 	ts := newTestServer(t)
 	created := ts.createWorkspace(t, workspace.CreateOptions{})
@@ -289,7 +317,7 @@ func TestExecRejectsOutsideCWD(t *testing.T) {
 func TestFileRoundTrip(t *testing.T) {
 	ts := newTestServer(t)
 	created := ts.createWorkspace(t, workspace.CreateOptions{})
-	target := filepath.Join(created.RootPath, "src", "app.ts")
+	target := "src/app.ts"
 
 	// stat before creation -> 404
 	response := ts.do(t, http.MethodPost, "/v1/workspaces/"+created.ID+"/files/stat", pathRequest{Path: target}, "")
@@ -332,7 +360,7 @@ func TestFileRoundTrip(t *testing.T) {
 	}
 
 	// readdir
-	response = ts.do(t, http.MethodPost, "/v1/workspaces/"+created.ID+"/files/readdir", pathRequest{Path: filepath.Join(created.RootPath, "src")}, "")
+	response = ts.do(t, http.MethodPost, "/v1/workspaces/"+created.ID+"/files/readdir", pathRequest{Path: "src"}, "")
 	if response.Code != http.StatusOK {
 		t.Fatalf("readdir status = %d", response.Code)
 	}
@@ -355,7 +383,7 @@ func TestFilesRejectEscape(t *testing.T) {
 	ts := newTestServer(t)
 	created := ts.createWorkspace(t, workspace.CreateOptions{})
 
-	escape := filepath.Join(created.RootPath, "..", "escape.txt")
+	escape := "../escape.txt"
 	for method, target := range map[string]string{
 		"read":    "/v1/workspaces/" + created.ID + "/files/read",
 		"write":   "/v1/workspaces/" + created.ID + "/files/write",
@@ -367,7 +395,7 @@ func TestFilesRejectEscape(t *testing.T) {
 			t.Fatalf("%s escape status = %d, want 400", target, response.Code)
 		}
 	}
-	if _, err := os.Stat(filepath.Join(filepath.Dir(created.RootPath), "escape.txt")); err == nil {
+	if _, err := os.Stat(filepath.Join(filepath.Dir(ts.hostRoot(t, created.ID)), "escape.txt")); err == nil {
 		t.Fatal("escape file was written")
 	}
 }
@@ -376,17 +404,17 @@ func TestGlob(t *testing.T) {
 	ts := newTestServer(t)
 	created := ts.createWorkspace(t, workspace.CreateOptions{})
 	for _, file := range []string{"a.ts", "b.js", "src/nested/a.ts"} {
-		if err := os.MkdirAll(filepath.Dir(filepath.Join(created.RootPath, file)), 0o755); err != nil {
+		if err := os.MkdirAll(filepath.Dir(filepath.Join(ts.hostRoot(t, created.ID), file)), 0o755); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(filepath.Join(created.RootPath, file), nil, 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(ts.hostRoot(t, created.ID), file), nil, 0o644); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if err := os.MkdirAll(filepath.Join(created.RootPath, "node_modules", "pkg"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(ts.hostRoot(t, created.ID), "node_modules", "pkg"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(created.RootPath, "node_modules", "pkg", "a.ts"), nil, 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(ts.hostRoot(t, created.ID), "node_modules", "pkg", "a.ts"), nil, 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -404,7 +432,7 @@ func TestGlob(t *testing.T) {
 		t.Fatalf("paths = %v", result.Paths)
 	}
 	for _, path := range result.Paths {
-		if path == filepath.Join(created.RootPath, "a.ts") {
+		if path == "a.ts" {
 			continue // root-level match: ** must match zero segments
 		}
 		if strings.Contains(path, "node_modules") || strings.HasSuffix(path, "b.js") {
@@ -417,10 +445,10 @@ func TestGrep(t *testing.T) {
 	ts := newTestServer(t)
 	created := ts.createWorkspace(t, workspace.CreateOptions{})
 	source := "one\ntwo needle three\nfour\nfive needle six"
-	if err := os.WriteFile(filepath.Join(created.RootPath, "doc.txt"), []byte(source), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(ts.hostRoot(t, created.ID), "doc.txt"), []byte(source), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(created.RootPath, "other.txt"), []byte("nothing here"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(ts.hostRoot(t, created.ID), "other.txt"), []byte("nothing here"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 

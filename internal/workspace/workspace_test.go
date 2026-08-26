@@ -44,7 +44,11 @@ func TestCreateWithoutRepo(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	info, err := os.Stat(created.RootPath)
+	hostRoot, err := manager.ResolvePath(created.ID, ".")
+	if err != nil {
+		t.Fatalf("resolve root: %v", err)
+	}
+	info, err := os.Stat(hostRoot)
 	if err != nil {
 		t.Fatalf("stat root: %v", err)
 	}
@@ -109,7 +113,7 @@ func TestDelete(t *testing.T) {
 	if _, err := manager.Get(ctx, created.ID); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("get after delete err = %v, want ErrNotFound", err)
 	}
-	if _, err := os.Stat(created.RootPath); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(manager.Root(), created.ID)); !os.IsNotExist(err) {
 		t.Fatalf("directory still exists: %v", err)
 	}
 	if err := manager.Delete(ctx, created.ID); !errors.Is(err, store.ErrNotFound) {
@@ -125,25 +129,24 @@ func TestResolvePath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	root := created.RootPath
+	hostRoot := filepath.Join(manager.Root(), created.ID)
 
-	got, err := manager.ResolvePath(created.ID, filepath.Join(root, "src", "..", "main.go"))
+	got, err := manager.ResolvePath(created.ID, filepath.Join("src", "..", "main.go"))
 	if err != nil {
 		t.Fatalf("resolve inside: %v", err)
 	}
-	if want := filepath.Join(root, "main.go"); got != want {
+	if want := filepath.Join(hostRoot, "main.go"); got != want {
 		t.Fatalf("resolve = %q, want %q", got, want)
 	}
 
-	if _, err := manager.ResolvePath(created.ID, root); err != nil {
+	if _, err := manager.ResolvePath(created.ID, "."); err != nil {
 		t.Fatalf("root itself rejected: %v", err)
 	}
-
-	if _, err := manager.ResolvePath(created.ID, filepath.Join(root, "..", "other")); !errors.Is(err, ErrOutsideRoot) {
+	if _, err := manager.ResolvePath(created.ID, "../other"); !errors.Is(err, ErrOutsideRoot) {
 		t.Fatalf("escape err = %v, want ErrOutsideRoot", err)
 	}
-	if _, err := manager.ResolvePath(created.ID, "relative/path"); !errors.Is(err, ErrOutsideRoot) {
-		t.Fatalf("relative err = %v, want ErrOutsideRoot", err)
+	if _, err := manager.ResolvePath(created.ID, "/host/path"); !errors.Is(err, ErrOutsideRoot) {
+		t.Fatalf("absolute err = %v, want ErrOutsideRoot", err)
 	}
 }
 
@@ -156,10 +159,14 @@ func TestResolvePathSymlinkEscape(t *testing.T) {
 		t.Fatalf("create: %v", err)
 	}
 	outside := t.TempDir()
-	if err := os.Symlink(outside, filepath.Join(created.RootPath, "escape")); err != nil {
+	hostRoot, err := manager.ResolvePath(created.ID, ".")
+	if err != nil {
+		t.Fatalf("resolve root: %v", err)
+	}
+	if err := os.Symlink(outside, filepath.Join(hostRoot, "escape")); err != nil {
 		t.Fatalf("symlink: %v", err)
 	}
-	if _, err := manager.ResolvePath(created.ID, filepath.Join(created.RootPath, "escape", "file")); !errors.Is(err, ErrOutsideRoot) {
+	if _, err := manager.ResolvePath(created.ID, filepath.Join("escape", "file")); !errors.Is(err, ErrOutsideRoot) {
 		t.Fatalf("symlink escape err = %v, want ErrOutsideRoot", err)
 	}
 }

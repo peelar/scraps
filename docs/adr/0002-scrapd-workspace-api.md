@@ -31,18 +31,15 @@ directory. This provider has no isolation; VM isolation arrives in M4.
 
   Codes: `unauthorized` (401), `invalid_request` (400), `invalid_path` (400),
   `not_found` (404), `workspace_not_available` (409), `internal` (500).
-- For the M1 directory provider, file paths in requests and responses are
-  **absolute paths in the workspace host's filesystem**. The extension learns
-  the workspace `rootPath` from the daemon and creates Pi tools with that path
-  space, so tool output (`pwd`, error messages, search results) shows real
-  paths. Paths must resolve inside the workspace root after cleaning and
-  symlink evaluation; anything else is `invalid_path`.
-- This path representation is explicitly transitional. Container and VM
-  providers must not expose implementation-specific host paths. Before adding
-  the first sandbox provider, the API will move to workspace-relative request
-  paths and a stable agent-visible virtual root (normally `/workspace`). This
-  requires a versioned compatibility change rather than silently changing M1
-  semantics.
+- File paths and exec `cwd` values in API requests are **workspace-relative**.
+  `.` denotes the workspace root. Absolute paths and lexical or symlink escapes
+  are rejected with `invalid_path`.
+- File search paths in responses are workspace-relative. Provider host paths,
+  container mountpoints, and VM disk layouts never cross the API boundary.
+- Pi and the model always see the stable virtual root `/workspace`. The
+  workspace resource declares `rootPath: "/workspace"` and
+  `pathContract: "workspace-relative-v1"`. The extension translates between
+  this display space and relative API paths.
 
 ### Workspace resource
 
@@ -52,7 +49,8 @@ directory. This provider has no isolation; VM isolation arrives in M4.
   "project": "owner/repository",
   "repoUrl": "https://github.com/owner/repository",
   "state": "running",
-  "rootPath": "/path/to/data/workspaces/quiet-river",
+  "rootPath": "/workspace",
+  "pathContract": "workspace-relative-v1",
   "createdAt": "2026-08-24T12:00:00Z",
   "updatedAt": "2026-08-24T12:00:00Z"
 }
@@ -74,8 +72,10 @@ start/stop endpoints arrive with M4/M6.
 
 `POST /v1/workspaces/{id}/exec` `{command, cwd?, env?, timeoutMs?}`:
 
-- `command` runs under `/bin/bash -c` on the scrapd host, in `cwd` (default
-  the workspace root, validated like file paths).
+- `command` runs under `/bin/bash -c` in `cwd` (default `.`, validated like
+  file paths). Sandboxed providers mount the workspace at `/workspace`. The
+  trusted directory provider emulates that root and redacts its host path from
+  command output.
 - `env` entries are added on top of the daemon's environment.
 - `timeoutMs` caps execution server-side (default none, hard cap 1 hour).
 
@@ -100,7 +100,7 @@ The response is `application/x-ndjson`, flushed per event:
 
 ### Files and search
 
-All take `{path, ...}` with absolute validated paths:
+All take `{path, ...}` with workspace-relative validated paths:
 
 - `POST /v1/workspaces/{id}/files/read` → `{content: "<base64>", size}`.
   Binary-safe; the extension decodes to a `Buffer` for Pi's read/edit
@@ -116,12 +116,12 @@ All take `{path, ...}` with absolute validated paths:
 - `POST /v1/workspaces/{id}/files/glob` `{pattern, path?, limit?}` →
   `{paths: [...]}` for Pi's find tool. Walks from `path` (default root),
   ignores `node_modules` and `.git`, matches the glob (`*`, `**`, `?`)
-  against the relative path and the basename, and returns absolute paths.
+  against the relative path and the basename, and returns relative paths.
 - `POST /v1/workspaces/{id}/files/grep`
   `{pattern, path?, glob?, ignoreCase?, literal?, context?, limit?}` →
 
   ```json
-  { "matches": [ { "path": "/abs/file.ts", "lineNumber": 3,
+  { "matches": [ { "path": "src/file.ts", "lineNumber": 3,
                    "lineText": "...",
                    "lines": [ {"n":2,"text":"...","match":false},
                               {"n":3,"text":"...","match":true} ] } ],
@@ -147,6 +147,26 @@ All take `{path, ...}` with absolute validated paths:
 - No auth on `/v1/info` (name/version only); everything else is gated when a
   token is configured.
 
+### Path-contract migration
+
+The original M1 contract returned directory-provider host paths. The migration
+is intentionally fail-closed rather than dual-mode:
+
+- Existing workspace rows require no database migration because host roots were
+  derived at read time and never persisted.
+- Updated daemons return `/workspace` and `workspace-relative-v1` for both new
+  and existing workspaces.
+- Updated extensions require that exact pair before attaching. Missing or
+  mismatched values produce an explicit compatibility error instructing the
+  user to upgrade daemon and extension together.
+- Updated daemons reject all absolute request paths. They do not guess whether
+  an absolute path is a legacy host path or a virtual path, preventing silent
+  routing to the wrong provider location.
+
+This is a versioned resource-level contract while HTTP routes remain under
+`/v1`; a future incompatible path model must use a new `pathContract` value and
+explicit client support.
+
 ## Consequences
 
 - The extension implements Pi's `BashOperations`, `ReadOperations`,
@@ -167,8 +187,5 @@ All take `{path, ...}` with absolute validated paths:
 1. `.gitignore`-aware search (M2, likely via ripgrep on the host).
 2. exec environment policy and credential brokering (M2/M3).
 3. Workspace stop/start/sleep lifecycle states (M4/M6).
-4. Version the path contract for sandbox providers: workspace-relative API
-   paths with stable `/workspace` display paths, independent of host/container
-   filesystem layout.
-5. Move lifecycle, exec, and filesystem operations behind a provider interface
-   before introducing Docker and Proxmox VM providers (ADR 0003).
+4. Add provider-specific enforcement that `/workspace` is the real mounted
+   root rather than directory-provider emulation.

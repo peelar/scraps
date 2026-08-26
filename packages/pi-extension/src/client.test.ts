@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { createServer, type Server } from "node:http";
 
-import { ScrapdClient, ScrapsConnectionError } from "./client.ts";
+import { ScrapdClient, ScrapsConnectionError, workspaceRelativePath } from "./client.ts";
 import { ScrapdApiError } from "./errors.ts";
 
 type FakeDaemon = {
@@ -36,7 +36,8 @@ async function startFakeDaemon(): Promise<FakeDaemon> {
 						id: "ws-1",
 						project: "owner/project",
 						state: "running",
-						rootPath: "/srv/workspaces/ws-1",
+						rootPath: "/workspace",
+						pathContract: "workspace-relative-v1",
 					}),
 				);
 				return;
@@ -132,6 +133,15 @@ async function startFakeDaemon(): Promise<FakeDaemon> {
 	};
 }
 
+describe("workspaceRelativePath", () => {
+	it("maps /workspace to relative API paths and rejects other roots", () => {
+		assert.equal(workspaceRelativePath("/workspace"), ".");
+		assert.equal(workspaceRelativePath("/workspace/src/a.ts"), "src/a.ts");
+		assert.equal(workspaceRelativePath("src/a.ts"), "src/a.ts");
+		assert.throws(() => workspaceRelativePath("/etc/passwd"), /outside \/workspace/);
+	});
+});
+
 describe("ScrapdClient", () => {
 	it("reads workspace records", async () => {
 		const daemon = await startFakeDaemon();
@@ -139,7 +149,8 @@ describe("ScrapdClient", () => {
 			const client = new ScrapdClient(daemon.url);
 			const workspace = await client.getWorkspace("ws-1");
 			assert.equal(workspace.id, "ws-1");
-			assert.equal(workspace.rootPath, "/srv/workspaces/ws-1");
+			assert.equal(workspace.rootPath, "/workspace");
+			assert.equal(workspace.pathContract, "workspace-relative-v1");
 			assert.equal(workspace.state, "running");
 		} finally {
 			await daemon.close();
@@ -151,8 +162,8 @@ describe("ScrapdClient", () => {
 		try {
 			const client = new ScrapdClient(daemon.url);
 			const bytes = Buffer.from([0x00, 0x01, 0xfe, 0xff, 0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a]);
-			await client.writeFile("ws-1", "/srv/workspaces/ws-1/logo.bin", bytes);
-			const readBack = await client.readFile("ws-1", "/srv/workspaces/ws-1/logo.bin");
+			await client.writeFile("ws-1", "/workspace/logo.bin", bytes);
+			const readBack = await client.readFile("ws-1", "/workspace/logo.bin");
 			assert.deepEqual(readBack, bytes);
 		} finally {
 			await daemon.close();
@@ -164,7 +175,7 @@ describe("ScrapdClient", () => {
 		try {
 			const client = new ScrapdClient(daemon.url);
 			try {
-				await client.readFile("ws-1", "/srv/workspaces/ws-1/missing.txt");
+				await client.readFile("ws-1", "/workspace/missing.txt");
 				assert.fail("expected failure");
 			} catch (error) {
 				assert.ok(error instanceof ScrapdApiError);
@@ -182,7 +193,7 @@ describe("ScrapdClient", () => {
 		try {
 			const client = new ScrapdClient(daemon.url);
 			const chunks: { data: string; stream: string }[] = [];
-			const result = await client.exec("ws-1", "make test", "/srv/workspaces/ws-1", {
+			const result = await client.exec("ws-1", "make test", "/workspace", {
 				onData: (chunk, stream) => chunks.push({ data: chunk.toString("utf8"), stream }),
 			});
 
@@ -207,7 +218,7 @@ describe("ScrapdClient", () => {
 			const client = new ScrapdClient(daemon.url);
 			await assert.rejects(
 				() =>
-					client.exec("ws-hang", "sleep forever", "/srv/workspaces/ws-1", {
+					client.exec("ws-hang", "sleep forever", "/workspace", {
 						onData: () => {},
 						timeout: 1,
 					}),
@@ -223,7 +234,7 @@ describe("ScrapdClient", () => {
 		try {
 			const client = new ScrapdClient(daemon.url);
 			const controller = new AbortController();
-			const pending = client.exec("ws-hang", "sleep forever", "/srv/workspaces/ws-1", {
+			const pending = client.exec("ws-hang", "sleep forever", "/workspace", {
 				onData: () => {},
 				signal: controller.signal,
 			});
@@ -259,12 +270,12 @@ describe("ScrapdClient", () => {
 		const daemon = await startFakeDaemon();
 		try {
 			const client = new ScrapdClient(daemon.url);
-			await client.writeFile("ws-1", "/srv/workspaces/ws-1/src/a.ts", "hello world\n");
-			const paths = await client.glob("ws-1", { pattern: "*.ts", path: "/srv/workspaces/ws-1" });
-			assert.ok(paths.includes("/srv/workspaces/ws-1/src/a.ts"));
+			await client.writeFile("ws-1", "/workspace/src/a.ts", "hello world\n");
+			const paths = await client.glob("ws-1", { pattern: "*.ts", path: "/workspace" });
+			assert.ok(paths.includes("src/a.ts"));
 			const grep = await client.grep("ws-1", { pattern: "hello" });
 			assert.equal(grep.matches.length, 1);
-			assert.equal(grep.matches[0]?.path, "/srv/workspaces/ws-1/src/a.ts");
+			assert.equal(grep.matches[0]?.path, "src/a.ts");
 		} finally {
 			await daemon.close();
 		}

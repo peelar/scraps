@@ -41,22 +41,28 @@ func (d *Directory) Delete(c context.Context, id string) error             { ret
 func (d *Directory) path(id, path string) (string, error) { return d.manager.ResolvePath(id, path) }
 
 func (d *Directory) Exec(ctx context.Context, id string, r ExecRequest, emit func(ExecEvent)) error {
-	w, err := d.Get(ctx, id)
-	if err != nil {
+	if _, err := d.Get(ctx, id); err != nil {
 		return err
 	}
 	cwd := r.CWD
 	if cwd == "" {
-		cwd = w.RootPath
+		cwd = "."
 	}
-	cwd, err = d.path(id, cwd)
+	cwd, err := d.path(id, cwd)
 	if err != nil {
 		return err
 	}
 	if info, err := os.Stat(cwd); err != nil || !info.IsDir() {
 		return &InvalidRequestError{Message: "working directory does not exist: " + r.CWD}
 	}
-	cmd := exec.CommandContext(ctx, "/bin/bash", "-c", r.Command)
+	hostRoot, err := d.path(id, ".")
+	if err != nil {
+		return err
+	}
+	// Sandboxed providers mount /workspace directly. The trusted directory
+	// provider emulates it and redacts its private host root from output.
+	command := strings.ReplaceAll(r.Command, workspace.VirtualRoot, hostRoot)
+	cmd := exec.CommandContext(ctx, "/bin/bash", "-c", command)
 	cmd.Dir = cwd
 	cmd.Env = append(os.Environ(), envSlice(r.Env)...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -80,8 +86,8 @@ func (d *Directory) Exec(ctx context.Context, id string, r ExecRequest, emit fun
 	emit(ExecEvent{Type: "start", PID: cmd.Process.Pid})
 	var wg sync.WaitGroup
 	wg.Add(2)
-	go copyOutput(&wg, stdout, "stdout", emit)
-	go copyOutput(&wg, stderr, "stderr", emit)
+	go copyOutput(&wg, stdout, "stdout", hostRoot, emit)
+	go copyOutput(&wg, stderr, "stderr", hostRoot, emit)
 	wg.Wait()
 	waitErr := cmd.Wait()
 	e := ExecEvent{Type: "exit"}
@@ -104,13 +110,13 @@ func (d *Directory) Exec(ctx context.Context, id string, r ExecRequest, emit fun
 	return nil
 }
 
-func copyOutput(wg *sync.WaitGroup, r io.Reader, stream string, emit func(ExecEvent)) {
+func copyOutput(wg *sync.WaitGroup, r io.Reader, stream, hostRoot string, emit func(ExecEvent)) {
 	defer wg.Done()
 	b := make([]byte, 32*1024)
 	for {
 		n, err := r.Read(b)
 		if n > 0 {
-			data := append([]byte(nil), b[:n]...)
+			data := []byte(strings.ReplaceAll(string(b[:n]), hostRoot, workspace.VirtualRoot))
 			emit(ExecEvent{Type: "output", Stream: stream, Data: data})
 		}
 		if err != nil {
@@ -215,15 +221,14 @@ func (d *Directory) ReadDir(_ context.Context, id, path string) ([]string, error
 var ignored = map[string]bool{".git": true, "node_modules": true, ".DS_Store": true}
 
 func (d *Directory) Glob(ctx context.Context, id string, r GlobRequest) ([]string, error) {
-	w, e := d.Get(ctx, id)
-	if e != nil {
+	if _, e := d.Get(ctx, id); e != nil {
 		return nil, e
 	}
 	root := r.Path
 	if root == "" {
-		root = w.RootPath
+		root = "."
 	}
-	root, e = d.path(id, root)
+	root, e := d.path(id, root)
 	if e != nil {
 		return nil, e
 	}
@@ -236,6 +241,10 @@ func (d *Directory) Glob(ctx context.Context, id string, r GlobRequest) ([]strin
 		limit = 200
 	}
 	match := compileGlob(r.Pattern)
+	workspaceRoot, e := d.path(id, ".")
+	if e != nil {
+		return nil, e
+	}
 	paths := []string{}
 	e = filepath.WalkDir(root, func(path string, de fs.DirEntry, e error) error {
 		if e != nil {
@@ -249,7 +258,7 @@ func (d *Directory) Glob(ctx context.Context, id string, r GlobRequest) ([]strin
 		}
 		rel := filepath.ToSlash(strings.TrimPrefix(path, root+string(filepath.Separator)))
 		if match(rel) || match(filepath.Base(path)) {
-			paths = append(paths, path)
+			paths = append(paths, filepath.ToSlash(strings.TrimPrefix(path, workspaceRoot+string(filepath.Separator))))
 			if len(paths) >= limit {
 				return fs.SkipAll
 			}
@@ -289,15 +298,14 @@ func (d *Directory) Grep(ctx context.Context, id string, r GrepRequest) (GrepRes
 		}
 		matcher = re.MatchString
 	}
-	w, e := d.Get(ctx, id)
-	if e != nil {
+	if _, e := d.Get(ctx, id); e != nil {
 		return GrepResult{}, e
 	}
 	root := r.Path
 	if root == "" {
-		root = w.RootPath
+		root = "."
 	}
-	root, e = d.path(id, root)
+	root, e := d.path(id, root)
 	if e != nil {
 		return GrepResult{}, e
 	}
@@ -315,6 +323,10 @@ func (d *Directory) Grep(ctx context.Context, id string, r GrepRequest) (GrepRes
 		gm = compileGlob(r.Glob)
 	}
 	result := GrepResult{Matches: []GrepMatch{}}
+	workspaceRoot, e := d.path(id, ".")
+	if e != nil {
+		return GrepResult{}, e
+	}
 	_ = filepath.WalkDir(root, func(path string, de fs.DirEntry, e error) error {
 		if e != nil {
 			return nil
@@ -328,7 +340,8 @@ func (d *Directory) Grep(ctx context.Context, id string, r GrepRequest) (GrepRes
 		if !searchable(path, gm) {
 			return nil
 		}
-		matches := grepFile(path, matcher, contextLines, limit-len(result.Matches))
+		displayPath := filepath.ToSlash(strings.TrimPrefix(path, workspaceRoot+string(filepath.Separator)))
+		matches := grepFile(path, displayPath, matcher, contextLines, limit-len(result.Matches))
 		result.Matches = append(result.Matches, matches...)
 		if len(result.Matches) >= limit {
 			result.LimitReached = true
@@ -351,7 +364,7 @@ func searchable(path string, gm func(string) bool) bool {
 	n, _ := f.Read(b)
 	return !strings.ContainsRune(string(b[:n]), 0)
 }
-func grepFile(path string, matcher func(string) bool, c, budget int) []GrepMatch {
+func grepFile(path, displayPath string, matcher func(string) bool, c, budget int) []GrepMatch {
 	f, e := os.Open(path)
 	if e != nil {
 		return nil
@@ -371,7 +384,7 @@ func grepFile(path string, matcher func(string) bool, c, budget int) []GrepMatch
 		if !matcher(line) {
 			continue
 		}
-		m := GrepMatch{Path: path, LineNumber: i + 1, LineText: line, Lines: []GrepLine{}}
+		m := GrepMatch{Path: displayPath, LineNumber: i + 1, LineText: line, Lines: []GrepLine{}}
 		if c > 0 {
 			start := max(i+1-c, 1)
 			end := min(i+1+c, len(lines))

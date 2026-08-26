@@ -58,7 +58,8 @@ describe("WorkspaceSession connection", () => {
 		id: "quiet-river",
 		project: "owner/project",
 		state: "running",
-		rootPath: "/srv/workspaces/quiet-river",
+		rootPath: "/workspace",
+		pathContract: "workspace-relative-v1",
 	};
 
 	it("shows disconnected status before connecting", () => {
@@ -69,7 +70,7 @@ describe("WorkspaceSession connection", () => {
 		assert.equal(session.root, DEFAULT_REMOTE_ROOT);
 	});
 
-	it("connects through the daemon and adopts the workspace rootPath", async () => {
+	it("connects through the daemon using the stable virtual root", async () => {
 		const client = fakeClient({ getWorkspace: async () => record });
 		const session = new WorkspaceSession(() => client);
 		session.configure(remoteConfig());
@@ -78,9 +79,24 @@ describe("WorkspaceSession connection", () => {
 
 		assert.equal(connected.id, "quiet-river");
 		assert.equal(session.connection.status, "connected");
-		assert.equal(session.root, "/srv/workspaces/quiet-river");
+		assert.equal(session.root, "/workspace");
 		assert.equal(statusText(session), "scrap:quiet-river");
-		assert.ok(describeSession(session).includes("Remote root: /srv/workspaces/quiet-river"));
+		assert.ok(describeSession(session).includes("Remote root: /workspace"));
+	});
+
+	it("fails explicitly for the transitional host-path contract", async () => {
+		const client = fakeClient({
+			getWorkspace: async () => ({
+				id: record.id,
+				state: record.state,
+				rootPath: "/srv/workspaces/quiet-river",
+			}),
+		});
+		const session = new WorkspaceSession(() => client);
+		session.configure(remoteConfig());
+
+		await assert.rejects(() => session.connect(), /Incompatible scrapd path contract/);
+		assert.equal(session.connection.status, "disconnected");
 	});
 
 	it("stays disconnected when the workspace is unknown", async () => {

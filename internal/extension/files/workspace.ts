@@ -13,10 +13,15 @@
 
 import { type RemoteConfig } from "./identity.ts";
 import { ScrapsUnavailableError } from "./errors.ts";
-import { type WorkspaceRecord, ScrapdClient } from "./client.ts";
+import {
+	REQUIRED_PATH_CONTRACT,
+	VIRTUAL_WORKSPACE_ROOT,
+	type WorkspaceRecord,
+	ScrapdClient,
+} from "./client.ts";
 
 /** Fallback project root used if the daemon record omits rootPath. */
-export const DEFAULT_REMOTE_ROOT = "/workspace";
+export const DEFAULT_REMOTE_ROOT = VIRTUAL_WORKSPACE_ROOT;
 
 export type ConnectionState =
 	| { readonly status: "disconnected"; readonly reason?: string }
@@ -80,8 +85,7 @@ export class WorkspaceSession {
 
 	/** Remote project root used to resolve relative paths in tools. */
 	get root(): string {
-		const rootPath = this.connectedWorkspace?.rootPath;
-		return rootPath !== undefined && rootPath.length > 0 ? rootPath : DEFAULT_REMOTE_ROOT;
+		return DEFAULT_REMOTE_ROOT;
 	}
 
 	/** Client for scrapd; throws when the extension is misconfigured. */
@@ -123,6 +127,7 @@ export class WorkspaceSession {
 		const client = this.requireClient();
 		try {
 			const workspace = await client.getWorkspace(id);
+			assertCompatibleWorkspace(workspace);
 			this.state = { status: "connected", workspace };
 			return workspace;
 		} catch (error) {
@@ -140,6 +145,7 @@ export class WorkspaceSession {
 		const workspace = await client.createWorkspace({
 			...(project === undefined ? {} : { project }),
 		});
+		assertCompatibleWorkspace(workspace);
 		this.state = { status: "connected", workspace };
 		return workspace;
 	}
@@ -160,6 +166,19 @@ export class WorkspaceSession {
 		const workspace = this.requireWorkspace();
 		await this.requireClient().deleteWorkspace(workspace.id);
 		this.disconnect(`workspace ${workspace.id} deleted`);
+	}
+}
+
+function assertCompatibleWorkspace(workspace: WorkspaceRecord): void {
+	if (
+		workspace.pathContract !== REQUIRED_PATH_CONTRACT ||
+		workspace.rootPath !== VIRTUAL_WORKSPACE_ROOT
+	) {
+		throw new ScrapsUnavailableError(
+			`Incompatible scrapd path contract: expected ${REQUIRED_PATH_CONTRACT} at ` +
+				`${VIRTUAL_WORKSPACE_ROOT}, got ${workspace.pathContract ?? "missing"} at ` +
+				`${workspace.rootPath ?? "missing"}. Upgrade scrapd and the Scraps Pi extension together.`,
+		);
 	}
 }
 

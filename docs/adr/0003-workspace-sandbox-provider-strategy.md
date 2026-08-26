@@ -102,13 +102,10 @@ behavior require a follow-up Proxmox-specific ADR before implementation.
 
 ### Provider-neutral paths
 
-The M1 absolute-host-path contract in ADR 0002 is transitional. Before the
-Docker provider lands:
-
-- client request paths will become workspace-relative;
-- Pi will see a stable virtual root, normally `/workspace`;
-- host paths, volume mountpoints, and VM disk layout will remain server-side;
-- the API change will be versioned and tested across the daemon and extension.
+The original M1 absolute-host-path contract was replaced before the Docker
+provider: API paths are workspace-relative, Pi sees `/workspace`, provider
+layout remains server-side, and workspace resources declare the versioned
+`workspace-relative-v1` contract. See ADR 0002 for migration behavior.
 
 ### Personalization and sandbox boundary
 
@@ -137,7 +134,8 @@ replacements.
 
 - Docker and Proxmox providers have different lifecycle and security semantics;
   capability differences must be represented rather than hidden.
-- Moving away from host-absolute paths requires an API compatibility change.
+- The provider-neutral path contract requires daemon and extension versions
+  that explicitly agree; mixed transitional/current versions fail closed.
 - Filesystem APIs may need a workspace agent, archive protocol, or runtime exec
   implementation; direct host `os.*` calls no longer work for every provider.
 - VM template creation, readiness, networking, snapshots, and reconciliation

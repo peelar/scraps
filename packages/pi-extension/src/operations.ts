@@ -118,16 +118,17 @@ export function createRemoteFindOps(session: WorkspaceSession): FindOperations {
 					throw error;
 				}
 			}),
-		// The daemon walks the tree server-side (ignoring .git and
-		// node_modules) and returns absolute paths.
+		// The daemon returns workspace-relative paths. Convert them back to
+		// stable agent-visible paths for Pi's built-in find renderer.
 		glob: (pattern, cwd, options) =>
-			remote(session, (ws, client) =>
-				client.glob(ws.id, {
+			remote(session, async (ws, client) => {
+				const paths = await client.glob(ws.id, {
 					pattern,
 					path: cwd,
 					...(options.limit > 0 ? { limit: options.limit } : {}),
-				}),
-			),
+				});
+				return paths.map((path) => displayPath(path, session.root));
+			}),
 	};
 }
 
@@ -157,8 +158,8 @@ export async function runRemoteGrep(
 	const client = session.requireClient();
 	const result = await client.grep(ws.id, {
 		...input,
-		// The daemon requires absolute paths; the built-in grep defaults to
-		// the current directory, so resolve like Pi's other path-taking tools.
+		// Resolve like Pi's other path-taking tools; the client translates the
+		// stable virtual path to the workspace-relative API contract.
 		path: resolveRemotePath(input.path, session.root),
 	});
 
@@ -221,7 +222,14 @@ export async function runRemoteGrep(
 	return { text, details: Object.keys(details).length > 0 ? details : undefined };
 }
 
-/** Render an absolute workspace path relative to the project root. */
+/** Render a workspace-relative API path under the stable virtual root. */
+export function displayPath(path: string, root: string): string {
+	if (path === "" || path === ".") return root;
+	if (path.startsWith("/")) return path;
+	return `${root}/${path.replace(/^\.\//, "")}`;
+}
+
+/** Render a workspace path relative to the project root. */
 export function relativeToRoot(path: string, root: string): string {
 	const normalizedRoot = root.endsWith("/") ? root : `${root}/`;
 	if (path.startsWith(normalizedRoot)) {
