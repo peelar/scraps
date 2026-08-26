@@ -43,9 +43,10 @@ scrap pi    # that's it — fresh workspace, interactive Pi
 ```
 
 `make up` is the one-command entry point: it builds `bin/scrap` and
-`bin/scrapd` when sources changed, kills a hung or stale daemon (one running
-older code than the freshly built binary), starts a new one detached, and
-waits until it is healthy. Daemon lifecycle is also managed implicitly —
+`bin/scrapd` when sources changed, installs stable `scrap`/`scrapd` symlinks
+into `~/.local/bin` (override with `INSTALL_DIR=...`), kills a hung or stale
+daemon (one running older code than the freshly built binary), starts a new
+one detached, and waits until it is healthy. Daemon lifecycle is also managed implicitly —
 `scrap pi`, `scrap ls`, and `scrap rm` start the daemon automatically when it
 is not running, so most days you never think about it.
 

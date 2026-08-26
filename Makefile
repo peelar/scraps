@@ -1,10 +1,22 @@
-.PHONY: build build-go check clean dev-daemon down sync-extension test up
+INSTALL_DIR ?= $(HOME)/.local/bin
 
-up: build
-	./bin/scrap up
+.PHONY: build build-go check clean dev-daemon down install sync-extension test uninstall up
+
+# One-command local setup: build, install stable PATH entries, ensure daemon.
+up: install
+	$(INSTALL_DIR)/scrap up
+
+install: build
+	mkdir -p $(INSTALL_DIR)
+	ln -sfn $(CURDIR)/bin/scrap $(INSTALL_DIR)/scrap
+	ln -sfn $(CURDIR)/bin/scrapd $(INSTALL_DIR)/scrapd
+	@echo "installed scrap + scrapd → $(INSTALL_DIR)"
+
+uninstall:
+	rm -f $(INSTALL_DIR)/scrap $(INSTALL_DIR)/scrapd
 
 down:
-	./bin/scrap down
+	$(INSTALL_DIR)/scrap down
 
 build: sync-extension build-go
 
