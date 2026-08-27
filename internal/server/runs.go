@@ -94,7 +94,10 @@ func (r *commandRunExecutor) Execute(ctx context.Context, request RunRequest, em
 // mode. The process gets its own process group so cancellation can kill the
 // whole tree.
 func (r *commandRunExecutor) startRemotePi(request RunRequest, checkpoint sessionCheckpoint) (*exec.Cmd, io.ReadCloser, io.ReadCloser, error) {
-	args := []string{"--mode", "json", "--session-dir", filepath.Join(r.dataDir, "pi-sessions", safeKey(request.SessionKey)), "-c", "--no-extensions", "-e", r.extensionPath,
+	// -p (print) is required: without it JSON-mode Pi starts the interactive
+	// loop, finds no TTY, prints only the session header, and exits 0 before
+	// processing the prompt — the run would "succeed" with no output.
+	args := []string{"--mode", "json", "-p", "--session-dir", filepath.Join(r.dataDir, "pi-sessions", safeKey(request.SessionKey)), "-c", "--no-extensions", "-e", r.extensionPath,
 		"--scrap", "--workspace", request.WorkspaceID}
 	if checkpoint.Provider != "" {
 		args = append(args, "--provider", checkpoint.Provider)
@@ -113,6 +116,10 @@ func (r *commandRunExecutor) startRemotePi(request RunRequest, checkpoint sessio
 		"SCRAP_DAEMON_URL="+r.daemonURL,
 		"SCRAP_WORKSPACE_ID="+request.WorkspaceID,
 		"SCRAP_TOKEN="+r.token,
+		// The runner extension must not intercept this process's own prompt:
+		// that would re-submit it as a new durable run instead of executing
+		// the agent loop (see runs.ts).
+		"SCRAP_DURABLE_RUN=1",
 	)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {

@@ -158,6 +158,9 @@ export function registerDurableRuns(pi: ExtensionAPI, session: WorkspaceSession)
 	});
 
 	pi.on("input", async (event, ctx) => {
+		// Inside the worker-side durable runner the agent loop must execute
+		// here; intercepting would re-submit the prompt as another run.
+		if (process.env.SCRAP_DURABLE_RUN === "1") return;
 		if (!session.remoteMode || session.connectedWorkspace === undefined || event.source !== "interactive") return;
 
 		const workspaceId = session.connectedWorkspace.id;
