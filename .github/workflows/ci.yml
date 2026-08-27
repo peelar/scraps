@@ -21,6 +21,10 @@ jobs:
       - run: go test ./...
       - run: go vet ./...
       - run: test -z "$(gofmt -l cmd internal)"
+      - name: Check embedded extension copy is in sync
+        run: |
+          make sync-extension
+          git diff --exit-code -- internal/extension
       - run: make build-go
       - name: Validate release packaging
         uses: goreleaser/goreleaser-action@v6
@@ -41,3 +45,4 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm check
+      - run: pnpm test
