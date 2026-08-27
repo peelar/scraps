@@ -1,12 +1,27 @@
-import type { ExtensionAPI, ThemeColor } from "@earendil-works/pi-coding-agent";
-import { getMarkdownTheme } from "@earendil-works/pi-coding-agent";
-import { Box, Markdown, Text } from "@earendil-works/pi-tui";
+import {
+	AssistantMessageComponent,
+	getMarkdownTheme,
+	ToolExecutionComponent,
+	UserMessageComponent,
+	type ExtensionAPI,
+	type ExtensionUIContext,
+	type Theme,
+} from "@earendil-works/pi-coding-agent";
+import { Box, Markdown, Text, truncateToWidth, visibleWidth, type Component, type TUI } from "@earendil-works/pi-tui";
 
 import type { RunEvent, RunRecord } from "./client.ts";
 import { ScrapdApiError } from "./errors.ts";
 import { describeError, type WorkspaceSession } from "./workspace.ts";
 
 const RUN_BINDING_ENTRY = "scraps-run-v1";
+const RUN_USER_ENTRY = "scraps-run-user-v1";
+const RUN_STREAM_SLOT_ENTRY = "scraps-run-stream-slot-v1";
+const RUN_STREAM_FINAL_ENTRY = "scraps-run-stream-final-v1";
+const RUN_WIDGET_KEY = "scrap-run";
+const TUI_CAPTURE_WIDGET_KEY = "scrap-tui-capture";
+
+const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+const MAX_MIRRORED_TOOL_OUTPUT_CHARS = 50_000;
 
 type RunBinding = {
 	readonly version: 1;
@@ -15,6 +30,37 @@ type RunBinding = {
 	readonly state: RunRecord["state"];
 	readonly lastEvent: number;
 };
+
+type AssistantBlock =
+	| { readonly type: "thinking"; readonly content: string }
+	| { readonly type: "text"; readonly content: string };
+
+type AssistantTranscript = {
+	readonly kind: "assistant";
+	readonly blocks: readonly AssistantBlock[];
+	readonly complete: boolean;
+	readonly stopReason?: string;
+	readonly errorMessage?: string;
+};
+
+type ToolTranscript = {
+	readonly kind: "tool";
+	readonly toolCallId: string;
+	readonly toolName: string;
+	readonly args: Record<string, unknown>;
+	readonly phase: "preparing" | "running" | "done";
+	readonly result?: {
+		readonly content: readonly Record<string, unknown>[];
+		readonly details?: unknown;
+		readonly isError: boolean;
+	};
+	readonly partial?: boolean;
+};
+
+export type TranscriptRecord = AssistantTranscript | ToolTranscript;
+type SequencedEvent = { sequence: number; data: Record<string, unknown> };
+type RunUi = Pick<ExtensionUIContext, "setStatus" | "setWidget" | "notify" | "theme">;
+type NativeAssistantMessage = Parameters<AssistantMessageComponent["updateContent"]>[0];
 
 function latestPendingRun(entries: readonly unknown[]): RunBinding | undefined {
 	let result: RunBinding | undefined;
@@ -30,17 +76,14 @@ function latestPendingRun(entries: readonly unknown[]): RunBinding | undefined {
 	return result;
 }
 
-/** Spinner frames for the live run indicator; native-like braille rotation. */
-const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-const RUN_WIDGET_KEY = "scrap-run";
-
-/** UI surface follow() needs; satisfied by the interactive extension context. */
-type RunUi = {
-	setStatus: (key: string, text: string | undefined) => void;
-	setWidget: (key: string, lines: string[] | undefined) => void;
-	notify: (message: string, level: "info" | "warning" | "error") => void;
-	theme: { fg: (color: ThemeColor, text: string) => string };
-};
+function sessionNeedsSeed(entries: readonly unknown[], workspaceId: string): boolean {
+	return !entries.some((value) => {
+		if (typeof value !== "object" || value === null) return false;
+		const entry = value as { type?: unknown; customType?: unknown; data?: unknown };
+		if (entry.type !== "custom" || entry.customType !== RUN_BINDING_ENTRY || typeof entry.data !== "object" || entry.data === null) return false;
+		return (entry.data as { workspaceId?: unknown }).workspaceId === workspaceId;
+	});
+}
 
 function elapsedLabel(startedAt: number): string {
 	const totalSeconds = Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
@@ -49,7 +92,6 @@ function elapsedLabel(startedAt: number): string {
 	return `${minutes}m${String(totalSeconds % 60).padStart(2, "0")}s`;
 }
 
-/** Custom message content arrives as a string or content blocks; flatten it. */
 function textContent(content: unknown): string {
 	if (typeof content === "string") return content;
 	if (!Array.isArray(content)) return "";
@@ -62,165 +104,386 @@ function textContent(content: unknown): string {
 		.join("");
 }
 
-/**
- * Transcript artifacts mirrored from the remote run. Tool calls and thinking
- * render as their own transcript rows so a remote run reads like a local one.
- */
+function record(value: unknown): Record<string, unknown> | undefined {
+	return typeof value === "object" && value !== null ? value as Record<string, unknown> : undefined;
+}
+
+function contentBlocks(message: unknown): Record<string, unknown>[] {
+	const content = record(message)?.content;
+	if (!Array.isArray(content)) return [];
+	const blocks: Record<string, unknown>[] = [];
+	for (const value of content) {
+		const block = record(value);
+		if (block !== undefined) blocks.push(block);
+	}
+	return blocks;
+}
+
+function assistantFromMessage(message: unknown, complete: boolean): AssistantTranscript | undefined {
+	const value = record(message);
+	if (value?.role !== "assistant") return undefined;
+	const blocks: AssistantBlock[] = [];
+	for (const block of contentBlocks(value)) {
+		if (block.type === "thinking" && typeof block.thinking === "string" && block.thinking.length > 0) {
+			blocks.push({ type: "thinking", content: block.thinking });
+		}
+		if (block.type === "text" && typeof block.text === "string" && block.text.length > 0) {
+			blocks.push({ type: "text", content: block.text });
+		}
+	}
+	return {
+		kind: "assistant",
+		blocks,
+		complete,
+		...(typeof value.stopReason === "string" ? { stopReason: value.stopReason } : {}),
+		...(typeof value.errorMessage === "string" ? { errorMessage: value.errorMessage } : {}),
+	};
+}
+
+function boundedToolContent(value: unknown): Record<string, unknown>[] {
+	const blocks: Record<string, unknown>[] = [];
+	if (Array.isArray(value)) {
+		for (const item of value) {
+			const block = record(item);
+			if (block !== undefined) blocks.push(block);
+		}
+	}
+	let remaining = MAX_MIRRORED_TOOL_OUTPUT_CHARS;
+	return blocks.flatMap((block) => {
+		if (block.type !== "text" || typeof block.text !== "string") return [block];
+		if (remaining <= 0) return [];
+		const text = block.text.slice(0, remaining);
+		remaining -= text.length;
+		return [{ ...block, text: text.length < block.text.length ? `${text}\n… (truncated)` : text }];
+	});
+}
+
+function toolResult(value: unknown, isError: boolean): NonNullable<ToolTranscript["result"]> {
+	const result = record(value) ?? {};
+	return {
+		content: boundedToolContent(result.content),
+		...(result.details === undefined ? {} : { details: result.details }),
+		isError,
+	};
+}
+
+/** Kept as a small, pure compatibility mapper for event-contract tests. */
 export type RunArtifact =
 	| { kind: "assistant"; text: string }
 	| { kind: "thinking"; text: string }
 	| { kind: "tool"; toolName: string; isError: boolean; output: string };
 
-const MAX_MIRRORED_TOOL_OUTPUT_CHARS = 8_000;
-
-function contentBlocks(message: unknown): { type: string; text?: string; thinking?: string }[] {
-	if (typeof message !== "object" || message === null) return [];
-	const content = (message as { content?: unknown }).content;
-	return Array.isArray(content) ? (content as { type: string }[]) : [];
-}
-
-/** Minimal shape shared by polled RunEvents and streamed envelopes. */
-type SequencedEvent = { sequence: number; data: Record<string, unknown> };
-
-/**
- * Map one persisted run event to the transcript artifacts it completes.
- * Streaming deltas intentionally produce nothing here — they only feed the
- * live activity indicator until the authoritative `message_end` lands.
- */
 export function artifactsFromEvent(event: SequencedEvent): RunArtifact[] {
 	if (event.data.type !== "message_end") return [];
-	const message = event.data.message;
-	if (typeof message !== "object" || message === null) return [];
-	const role = (message as { role?: unknown }).role;
-	if (role === "assistant") {
-		const artifacts: RunArtifact[] = [];
-		let thinking = "";
-		let text = "";
-		for (const block of contentBlocks(message)) {
-			if (block.type === "thinking" && typeof block.thinking === "string") thinking += block.thinking;
-			if (block.type === "text" && typeof block.text === "string") text += block.text;
-		}
-		if (thinking.trim().length > 0) artifacts.push({ kind: "thinking", text: thinking });
-		if (text.trim().length > 0) artifacts.push({ kind: "assistant", text });
-		return artifacts;
+	const message = record(event.data.message);
+	if (message?.role === "assistant") {
+		const assistant = assistantFromMessage(message, true);
+		if (assistant === undefined) return [];
+		const thinking = assistant.blocks.filter((block) => block.type === "thinking").map((block) => block.content).join("");
+		const text = assistant.blocks.filter((block) => block.type === "text").map((block) => block.content).join("");
+		return [
+			...(thinking.trim().length > 0 ? [{ kind: "thinking" as const, text: thinking }] : []),
+			...(text.trim().length > 0 ? [{ kind: "assistant" as const, text }] : []),
+		];
 	}
-	if (role === "toolResult") {
-		const toolName = typeof (message as { toolName?: unknown }).toolName === "string" ? (message as { toolName: string }).toolName : "tool";
-		const isError = (message as { isError?: unknown }).isError === true;
-		let output = contentBlocks(message).map((block) => (block.type === "text" && typeof block.text === "string" ? block.text : "")).join("");
-		if (output.length > MAX_MIRRORED_TOOL_OUTPUT_CHARS) output = `${output.slice(0, MAX_MIRRORED_TOOL_OUTPUT_CHARS)}\n… (truncated)`;
-		if (output.trim().length > 0 || isError) return [{ kind: "tool", toolName, isError, output }];
-		return [];
+	if (message?.role === "toolResult") {
+		const toolName = typeof message.toolName === "string" ? message.toolName : "tool";
+		const isError = message.isError === true;
+		const rawOutput = textContent(message.content);
+		const output = rawOutput.length > MAX_MIRRORED_TOOL_OUTPUT_CHARS
+			? `${rawOutput.slice(0, MAX_MIRRORED_TOOL_OUTPUT_CHARS)}\n… (truncated)`
+			: rawOutput;
+		return output.trim().length > 0 || isError ? [{ kind: "tool", toolName, isError, output }] : [];
 	}
 	return [];
 }
 
-/** One-line status of what the remote agent is doing right now, if anything. */
 export function activityFromEvent(event: SequencedEvent): string | undefined {
 	if (event.data.type === "message_update") {
-		const update = event.data.assistantMessageEvent;
-		if (typeof update !== "object" || update === null) return undefined;
-		switch ((update as { type?: unknown }).type) {
+		const update = record(event.data.assistantMessageEvent);
+		switch (update?.type) {
 			case "thinking_start":
 			case "thinking_delta":
 				return "thinking";
 			case "text_start":
-			case "text_delta": {
-				const delta = (update as { delta?: unknown }).delta;
-				const tail = typeof delta === "string" ? delta.trimEnd().split("\n").pop() ?? "" : "";
-				return tail.length > 0 ? `writing: ${tail.slice(-48)}` : "writing";
-			}
-			case "toolcall_start": {
-				const name = (update as { toolName?: unknown }).toolName;
-				return typeof name === "string" ? `preparing ${name}` : "preparing a tool call";
-			}
+			case "text_delta":
+				return "writing";
+			case "toolcall_start":
+				return typeof update.toolName === "string" ? `preparing ${update.toolName}` : "preparing a tool call";
 			case "toolcall_end": {
-				const call = (update as { toolCall?: { name?: unknown } }).toolCall;
+				const call = record(update.toolCall);
 				return typeof call?.name === "string" ? `calling ${call.name}` : undefined;
 			}
-			default:
-				return undefined;
 		}
 	}
 	if (event.data.type === "tool_execution_start" || event.data.type === "tool_execution_update") {
-		const name = event.data.toolName;
-		return typeof name === "string" ? `running ${name}` : "running a tool";
+		return typeof event.data.toolName === "string" ? `running ${event.data.toolName}` : "running a tool";
 	}
 	if (event.data.type === "tool_execution_end") {
-		const name = event.data.toolName;
-		const failed = event.data.isError === true;
-		return typeof name === "string" ? `${name} ${failed ? "failed" : "done"}` : undefined;
+		return typeof event.data.toolName === "string" ? `${event.data.toolName} ${event.data.isError === true ? "failed" : "done"}` : undefined;
 	}
 	return undefined;
 }
 
-/**
- * Render remote mirrors distinctly from local traffic: the user echo is
- * muted, thinking is a dim collapsed trace, tool calls are single status
- * rows, and the assistant reply gets native-style markdown.
- */
-function registerRunRenderers(pi: ExtensionAPI): void {
-	pi.registerMessageRenderer("scraps-remote-user", (message, { outputPad }, theme) => {
-		const text = [
-			theme.fg("muted", "[remote user]"),
-			"",
-			theme.fg("userMessageText", textContent(message.content)),
-		].join("\n");
-		return new Text(text, outputPad, 0);
-	});
-	pi.registerMessageRenderer("scraps-remote-thinking", (message, { expanded, outputPad }, theme) => {
-		const text = textContent(message.content);
-		if (expanded) {
-			return new Text([theme.fg("muted", "[remote thinking]"), "", theme.fg("muted", text)].join("\n"), outputPad, 0);
+function zeroUsage(): NativeAssistantMessage["usage"] {
+	return {
+		input: 0,
+		output: 0,
+		cacheRead: 0,
+		cacheWrite: 0,
+		totalTokens: 0,
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+	};
+}
+
+function nativeAssistant(recordValue: AssistantTranscript): NativeAssistantMessage {
+	const stopReason = recordValue.stopReason;
+	return {
+		role: "assistant",
+		content: recordValue.blocks.map((block) => block.type === "thinking"
+			? { type: "thinking", thinking: block.content }
+			: { type: "text", text: block.content }),
+		api: "anthropic-messages",
+		provider: "scraps",
+		model: "remote",
+		usage: zeroUsage(),
+		stopReason: stopReason === "length" || stopReason === "error" || stopReason === "aborted" || stopReason === "toolUse" || stopReason === "deferred"
+			? stopReason
+			: recordValue.complete ? "stop" : "pending",
+		...(recordValue.errorMessage === undefined ? {} : { errorMessage: recordValue.errorMessage }),
+		timestamp: Date.now(),
+	};
+}
+
+/** Remove the native component's own transcript spacer; custom entries own it. */
+function withoutLeadingBlank(lines: string[]): string[] {
+	if (lines[0] === undefined || visibleWidth(lines[0]) !== 0) return lines;
+	if (lines[1] !== undefined) lines[1] = `${lines[0]}${lines[1]}`; // preserve OSC 133 markers
+	return lines.slice(1);
+}
+
+class AssistantSlotComponent implements Component {
+	private child: AssistantMessageComponent | undefined;
+	private previous: AssistantTranscript | undefined;
+	private readonly state: () => TranscriptRecord | undefined;
+	private readonly expanded: boolean;
+
+	constructor(state: () => TranscriptRecord | undefined, expanded: boolean) {
+		this.state = state;
+		this.expanded = expanded;
+	}
+
+	render(width: number): string[] {
+		const value = this.state();
+		if (value?.kind !== "assistant" || value.blocks.length === 0) return [];
+		if (this.child === undefined) {
+			this.child = new AssistantMessageComponent(undefined, !this.expanded, getMarkdownTheme(), "Thinking…", 1);
 		}
-		const characters = text.length.toLocaleString("en-US");
-		return new Text(theme.fg("muted", `· thinking · ${characters} chars ·`), outputPad, 0);
-	});
-	pi.registerMessageRenderer("scraps-remote-tool", (message, { expanded, outputPad }, theme) => {
-		let toolName = "tool";
-		let isError = false;
-		let output = "";
-		try {
-			const parsed = JSON.parse(textContent(message.content)) as { toolName?: unknown; isError?: unknown; output?: unknown };
-			if (typeof parsed.toolName === "string") toolName = parsed.toolName;
-			if (typeof parsed.isError === "boolean") isError = parsed.isError;
-			if (typeof parsed.output === "string") output = parsed.output;
-		} catch {
-			// fall through with defaults
+		if (value !== this.previous) {
+			this.child.updateContent(nativeAssistant(value), !value.complete);
+			this.previous = value;
 		}
-		const status = isError ? theme.fg("error", "✗") : theme.fg("success", "✓");
-		if (!expanded || output.length === 0) {
-			return new Text(`${theme.fg("accent", `⏺ ${toolName}`)} ${status}`, outputPad, 0);
+		return withoutLeadingBlank(this.child.render(width));
+	}
+
+	invalidate(): void {
+		this.child?.invalidate();
+		this.previous = undefined;
+	}
+}
+
+class ToolSlotComponent implements Component {
+	private child: ToolExecutionComponent | undefined;
+	private previous: ToolTranscript | undefined;
+	private readonly state: () => TranscriptRecord | undefined;
+	private readonly expanded: boolean;
+	private readonly getTui: () => TUI | undefined;
+
+	constructor(state: () => TranscriptRecord | undefined, expanded: boolean, getTui: () => TUI | undefined) {
+		this.state = state;
+		this.expanded = expanded;
+		this.getTui = getTui;
+	}
+
+	render(width: number): string[] {
+		const value = this.state();
+		const tui = this.getTui();
+		if (value?.kind !== "tool" || tui === undefined) return [];
+		if (this.child === undefined) {
+			this.child = new ToolExecutionComponent(value.toolName, value.toolCallId, value.args, { showImages: false }, undefined, tui, "/workspace");
 		}
-		const lines = output.split("\n").slice(0, 200).map((line) => theme.fg("muted", `  ${line}`));
-		return new Text([`${theme.fg("accent", `⏺ ${toolName}`)} ${status}`, ...lines].join("\n"), outputPad, 0);
+		if (value !== this.previous) {
+			this.child.updateArgs(value.args);
+			if (value.phase !== "preparing") this.child.markExecutionStarted();
+			// Do not call setArgsComplete(): the built-in edit renderer would
+			// preview against the laptop filesystem. The authoritative remote
+			// diff arrives in result.details and renders natively below.
+			if (value.result !== undefined) {
+				this.child.updateResult({
+					content: [...value.result.content] as Array<{ type: string; text?: string; data?: string; mimeType?: string }>,
+					details: value.result.details,
+					isError: value.result.isError,
+				}, value.partial === true);
+			}
+			this.previous = value;
+		}
+		this.child.setExpanded(this.expanded);
+		return withoutLeadingBlank(this.child.render(width));
+	}
+
+	invalidate(): void {
+		this.child?.invalidate();
+		this.previous = undefined;
+	}
+}
+
+class RunProgressComponent implements Component {
+	private state = "connecting";
+	private activity: string | undefined;
+	private frame = 0;
+	private readonly startedAt = Date.now();
+	private readonly timer: ReturnType<typeof setInterval>;
+	private readonly tui: TUI;
+	private readonly theme: Theme;
+
+	constructor(tui: TUI, theme: Theme) {
+		this.tui = tui;
+		this.theme = theme;
+		this.timer = setInterval(() => {
+			this.frame++;
+			this.tui.requestRender();
+		}, 80);
+	}
+
+	update(state: string, activity?: string): void {
+		this.state = state;
+		this.activity = activity;
+		this.tui.requestRender();
+	}
+
+	render(width: number): string[] {
+		const spinner = SPINNER_FRAMES[this.frame % SPINNER_FRAMES.length] ?? "·";
+		const first = this.theme.fg("accent", `${spinner} remote pi · ${this.state} · ${elapsedLabel(this.startedAt)}`);
+		const lines = [truncateToWidth(first, width)];
+		if (this.activity !== undefined && this.activity !== this.state) {
+			lines.push(truncateToWidth(this.theme.fg("muted", `  ${this.activity}`), width));
+		}
+		return lines;
+	}
+
+	invalidate(): void {}
+
+	dispose(): void {
+		clearInterval(this.timer);
+	}
+}
+
+type ProgressController = {
+	update: (state: string, activity?: string) => void;
+	close: () => void;
+};
+
+function showRunProgress(ui: RunUi, onTui: (tui: TUI) => void): ProgressController {
+	let component: RunProgressComponent | undefined;
+	ui.setWidget(RUN_WIDGET_KEY, (tui, theme) => {
+		onTui(tui);
+		component = new RunProgressComponent(tui, theme);
+		return component;
 	});
-	pi.registerMessageRenderer("scraps-remote-assistant", (message, { outputPad }, theme) => {
-		const box = new Box(outputPad, 0);
-		box.addChild(new Text(theme.fg("accent", "[remote assistant]"), 0, 0));
-		box.addChild(new Text("", 0, 0));
-		box.addChild(new Markdown(textContent(message.content), outputPad, 0, getMarkdownTheme()));
-		return box;
-	});
+	return {
+		update: (state, activity) => component?.update(state, activity),
+		close: () => ui.setWidget(RUN_WIDGET_KEY, undefined),
+	};
 }
 
 function terminal(state: RunRecord["state"]): boolean {
 	return state === "succeeded" || state === "failed" || state === "cancelled";
 }
 
+function registerLegacyRenderers(pi: ExtensionAPI): void {
+	pi.registerMessageRenderer("scraps-remote-user", (message, { outputPad }) => new UserMessageComponent(textContent(message.content), getMarkdownTheme(), outputPad));
+	pi.registerMessageRenderer("scraps-remote-thinking", (message, { expanded, outputPad }, theme) => {
+		const text = textContent(message.content);
+		return expanded
+			? new Markdown(text, outputPad, 0, getMarkdownTheme(), { color: (value) => theme.fg("muted", value), italic: true })
+			: new Text(theme.fg("muted", "Thinking…"), outputPad, 0);
+	});
+	pi.registerMessageRenderer("scraps-remote-tool", (message, { expanded, outputPad }, theme) => {
+		const parsed = (() => { try { return JSON.parse(textContent(message.content)) as { toolName?: string; isError?: boolean; output?: string }; } catch { return {}; } })();
+		const title = `${theme.fg("toolTitle", `⏺ ${parsed.toolName ?? "tool"}`)} ${parsed.isError ? theme.fg("error", "✗") : theme.fg("success", "✓")}`;
+		return new Text(expanded && parsed.output ? `${title}\n${theme.fg("toolOutput", parsed.output)}` : title, outputPad, 0);
+	});
+	pi.registerMessageRenderer("scraps-remote-assistant", (message, { outputPad }) => new Markdown(textContent(message.content), outputPad, 0, getMarkdownTheme()));
+}
+
 /**
- * Route every interactive Scraps prompt to scrapd's durable Pi runner.
- * Durable execution is the `/scrap` contract; unsupported workers fail closed
- * instead of silently returning ownership of the agent loop to the laptop.
+ * Route interactive Scraps prompts to the durable runner while rendering the
+ * remote JSON event protocol through Pi's own native assistant/tool components.
  */
 export function registerDurableRuns(pi: ExtensionAPI, session: WorkspaceSession): void {
 	let runnerReadiness: { durableRuns: boolean; modelAuth: boolean; runEventStream: boolean } | undefined;
 	let stopped = false;
 	let activeAbort: AbortController | undefined;
+	let tui: TUI | undefined;
 
-	registerRunRenderers(pi);
+	const knownSlots = new Set<string>();
+	const liveSlots = new Map<string, TranscriptRecord>();
+	const completedSlots = new Map<string, TranscriptRecord>();
 
-	const readRunnerReadiness = async (): Promise<{ durableRuns: boolean; modelAuth: boolean; runEventStream: boolean }> => {
+	registerLegacyRenderers(pi);
+	pi.registerEntryRenderer(RUN_USER_ENTRY, (entry) => {
+		const data = record(entry.data);
+		return typeof data?.text === "string" ? new UserMessageComponent(data.text, getMarkdownTheme(), 1) : undefined;
+	});
+	pi.registerEntryRenderer(RUN_STREAM_SLOT_ENTRY, (entry, { expanded }) => {
+		const data = record(entry.data);
+		if (typeof data?.slotId !== "string") return undefined;
+		const getState = () => liveSlots.get(data.slotId as string) ?? completedSlots.get(data.slotId as string);
+		const value = getState();
+		if (value?.kind === "tool" || String(data.slotId).includes(":tool:")) {
+			return new ToolSlotComponent(getState, expanded, () => tui);
+		}
+		return new AssistantSlotComponent(getState, expanded);
+	});
+	// Completion entries are durable update records. Their renderer is
+	// intentionally empty; the original slot keeps its chronological position.
+	pi.registerEntryRenderer(RUN_STREAM_FINAL_ENTRY, () => undefined);
+
+	const restoreTranscript = (entries: readonly unknown[]) => {
+		knownSlots.clear();
+		completedSlots.clear();
+		for (const value of entries) {
+			if (typeof value !== "object" || value === null) continue;
+			const entry = value as { type?: unknown; customType?: unknown; data?: unknown };
+			const data = record(entry.data);
+			if (entry.type !== "custom" || data === undefined || typeof data.slotId !== "string") continue;
+			if (entry.customType === RUN_STREAM_SLOT_ENTRY) knownSlots.add(data.slotId);
+			if (entry.customType === RUN_STREAM_FINAL_ENTRY && record(data.value)?.kind !== undefined) {
+				completedSlots.set(data.slotId, data.value as TranscriptRecord);
+			}
+		}
+	};
+
+	const ensureSlot = (slotId: string, initial: TranscriptRecord) => {
+		if (!completedSlots.has(slotId)) liveSlots.set(slotId, initial);
+		if (!knownSlots.has(slotId)) {
+			knownSlots.add(slotId);
+			pi.appendEntry(RUN_STREAM_SLOT_ENTRY, { version: 1, slotId });
+		}
+		tui?.requestRender();
+	};
+	const updateSlot = (slotId: string, value: TranscriptRecord) => {
+		if (!completedSlots.has(slotId)) liveSlots.set(slotId, value);
+		tui?.requestRender();
+	};
+	const completeSlot = (slotId: string, value: TranscriptRecord) => {
+		const alreadyComplete = completedSlots.has(slotId);
+		completedSlots.set(slotId, value);
+		liveSlots.delete(slotId);
+		if (!alreadyComplete) pi.appendEntry(RUN_STREAM_FINAL_ENTRY, { version: 1, slotId, value });
+	};
+
+	const readRunnerReadiness = async () => {
 		if (runnerReadiness?.durableRuns === true && runnerReadiness.modelAuth === true) return runnerReadiness;
 		const features = (await session.requireClient().info()).features;
 		runnerReadiness = {
@@ -230,58 +493,157 @@ export function registerDurableRuns(pi: ExtensionAPI, session: WorkspaceSession)
 		};
 		return runnerReadiness;
 	};
-
 	const readinessError = (readiness: { durableRuns: boolean; modelAuth: boolean }): string | undefined => {
 		if (!readiness.durableRuns) return "This Scraps worker does not provide the required durable Pi runner. Upgrade or configure the worker before submitting a prompt.";
 		if (!readiness.modelAuth) return "The durable Pi runner has no model authorization. On the worker, run: sudo scraps-worker model-auth anthropic";
 		return undefined;
 	};
-
 	const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-	/**
-	 * Follow a run until it settles. Events stream over SSE the moment the
-	 * worker persists them (falling back to polling on older daemons); the
-	 * spinner and elapsed timer animate locally so the UI never stutters
-	 * regardless of network latency.
-	 */
-	const follow = async (runId: string, workspaceId: string, after: number, ui: RunUi): Promise<void> => {
+	const follow = async (runId: string, workspaceId: string, after: number, ui: RunUi, progress: ProgressController): Promise<void> => {
 		const client = session.requireClient();
 		let useStream = runnerReadiness?.runEventStream === true;
 		let cursor = after;
-		const startedAt = Date.now();
-		let frameIndex = 0;
-		let state = "starting";
+		let state: RunRecord["state"] = "queued";
 		let activity: string | undefined;
-		let backoffMs = 250;
-
-		const renderWidget = () => {
-			const dot = SPINNER_FRAMES[frameIndex++ % SPINNER_FRAMES.length];
-			const lines = [ui.theme.fg("accent", `${dot} remote pi · ${state} · ${elapsedLabel(startedAt)}`)];
-			if (activity !== undefined) lines.push(ui.theme.fg("muted", `  ${activity}`));
-			ui.setWidget(RUN_WIDGET_KEY, lines);
-		};
-		const animation = setInterval(renderWidget, 100);
+		let backoffMs = 100;
+		let activeAssistant: { slotId: string; blocks: Map<number, AssistantBlock> } | undefined;
+		const tools = new Map<string, ToolTranscript>();
 		const abort = new AbortController();
 		activeAbort = abort;
 
+		const assistantValue = (): AssistantTranscript | undefined => activeAssistant === undefined ? undefined : {
+			kind: "assistant",
+			blocks: [...activeAssistant.blocks.entries()].sort(([a], [b]) => a - b).map(([, block]) => block),
+			complete: false,
+		};
+		const putAssistant = () => {
+			const value = assistantValue();
+			if (activeAssistant !== undefined && value !== undefined) updateSlot(activeAssistant.slotId, value);
+		};
+		const putTool = (value: ToolTranscript) => {
+			tools.set(value.toolCallId, value);
+			const slotId = `${runId}:tool:${value.toolCallId}`;
+			if (knownSlots.has(slotId)) updateSlot(slotId, value);
+			else ensureSlot(slotId, value);
+		};
+
 		const handleEvent = (event: SequencedEvent) => {
 			cursor = Math.max(cursor, event.sequence);
-			for (const artifact of artifactsFromEvent(event)) {
-				if (artifact.kind === "assistant") {
-					pi.sendMessage({ customType: "scraps-remote-assistant", content: artifact.text, display: true });
-				} else if (artifact.kind === "thinking") {
-					pi.sendMessage({ customType: "scraps-remote-thinking", content: artifact.text, display: true });
-				} else {
-					pi.sendMessage({
-						customType: "scraps-remote-tool",
-						content: JSON.stringify({ toolName: artifact.toolName, isError: artifact.isError, output: artifact.output }),
-						display: true,
-					});
+			const data = event.data;
+			if (data.type === "agent_start") progress.update("working");
+			if (data.type === "message_start") {
+				const message = record(data.message);
+				if (message?.role === "assistant") {
+					const slotId = `${runId}:assistant:${event.sequence}`;
+					activeAssistant = { slotId, blocks: new Map() };
+					ensureSlot(slotId, { kind: "assistant", blocks: [], complete: false });
 				}
+			}
+			if (data.type === "message_update") {
+				const update = record(data.assistantMessageEvent);
+				const index = typeof update?.contentIndex === "number" ? update.contentIndex : 0;
+				if (activeAssistant !== undefined && update !== undefined) {
+					if (update.type === "thinking_start") activeAssistant.blocks.set(index, { type: "thinking", content: "" });
+					if (update.type === "thinking_delta" && typeof update.delta === "string") {
+						const previous = activeAssistant.blocks.get(index);
+						activeAssistant.blocks.set(index, { type: "thinking", content: `${previous?.content ?? ""}${update.delta}` });
+					}
+					if (update.type === "thinking_end" && typeof update.content === "string") activeAssistant.blocks.set(index, { type: "thinking", content: update.content });
+					if (update.type === "text_start") activeAssistant.blocks.set(index, { type: "text", content: "" });
+					if (update.type === "text_delta" && typeof update.delta === "string") {
+						const previous = activeAssistant.blocks.get(index);
+						activeAssistant.blocks.set(index, { type: "text", content: `${previous?.content ?? ""}${update.delta}` });
+					}
+					if (update.type === "text_end" && typeof update.content === "string") activeAssistant.blocks.set(index, { type: "text", content: update.content });
+					putAssistant();
+				}
+				if (update?.type === "toolcall_start" && typeof update.id === "string") {
+					putTool({ kind: "tool", toolCallId: update.id, toolName: typeof update.toolName === "string" ? update.toolName : "tool", args: {}, phase: "preparing" });
+				}
+				if (update?.type === "toolcall_end") {
+					const call = record(update.toolCall);
+					if (typeof call?.id === "string") {
+						const previous = tools.get(call.id);
+						putTool({
+							kind: "tool",
+							toolCallId: call.id,
+							toolName: typeof call.name === "string" ? call.name : previous?.toolName ?? "tool",
+							args: record(call.arguments) ?? {},
+							phase: "preparing",
+						});
+					}
+				}
+			}
+			if (data.type === "message_end") {
+				const message = record(data.message);
+				if (message?.role === "assistant") {
+					const value = assistantFromMessage(message, true);
+					if (value !== undefined) {
+						if (activeAssistant === undefined) {
+							const slotId = `${runId}:assistant:${event.sequence}`;
+							ensureSlot(slotId, value);
+							completeSlot(slotId, value);
+						} else {
+							completeSlot(activeAssistant.slotId, value);
+						}
+					}
+					activeAssistant = undefined;
+				}
+				if (message?.role === "toolResult" && typeof message.toolCallId === "string") {
+					const previous = tools.get(message.toolCallId);
+					if (previous?.phase !== "done") {
+						const value: ToolTranscript = {
+							kind: "tool",
+							toolCallId: message.toolCallId,
+							toolName: typeof message.toolName === "string" ? message.toolName : previous?.toolName ?? "tool",
+							args: previous?.args ?? {},
+							phase: "done",
+							result: { content: boundedToolContent(message.content), isError: message.isError === true },
+						};
+						putTool(value);
+						completeSlot(`${runId}:tool:${value.toolCallId}`, value);
+					}
+				}
+			}
+			if (data.type === "tool_execution_start" && typeof data.toolCallId === "string") {
+				const previous = tools.get(data.toolCallId);
+				putTool({
+					kind: "tool",
+					toolCallId: data.toolCallId,
+					toolName: typeof data.toolName === "string" ? data.toolName : previous?.toolName ?? "tool",
+					args: record(data.args) ?? previous?.args ?? {},
+					phase: "running",
+				});
+			}
+			if (data.type === "tool_execution_update" && typeof data.toolCallId === "string") {
+				const previous = tools.get(data.toolCallId);
+				putTool({
+					kind: "tool",
+					toolCallId: data.toolCallId,
+					toolName: typeof data.toolName === "string" ? data.toolName : previous?.toolName ?? "tool",
+					args: record(data.args) ?? previous?.args ?? {},
+					phase: "running",
+					result: toolResult(data.partialResult, false),
+					partial: true,
+				});
+			}
+			if (data.type === "tool_execution_end" && typeof data.toolCallId === "string") {
+				const previous = tools.get(data.toolCallId);
+				const value: ToolTranscript = {
+					kind: "tool",
+					toolCallId: data.toolCallId,
+					toolName: typeof data.toolName === "string" ? data.toolName : previous?.toolName ?? "tool",
+					args: previous?.args ?? {},
+					phase: "done",
+					result: toolResult(data.result, data.isError === true),
+				};
+				putTool(value);
+				completeSlot(`${runId}:tool:${value.toolCallId}`, value);
 			}
 			const nextActivity = activityFromEvent(event);
 			if (nextActivity !== undefined) activity = nextActivity;
+			progress.update(state === "queued" ? "working" : state, activity);
 		};
 
 		try {
@@ -294,47 +656,48 @@ export function registerDurableRuns(pi: ExtensionAPI, session: WorkspaceSession)
 						if (error instanceof ScrapdApiError && (error.status === 404 || error.status === 405)) {
 							runnerReadiness = { ...(runnerReadiness ?? { durableRuns: true, modelAuth: true }), runEventStream: false };
 							useStream = false;
-						continue;
+							continue;
 						}
-						// Connection dropped mid-run; the run continues on the
-						// worker, so reconnect from the last seen event.
+						progress.update("reconnecting", activity);
 						await sleep(backoffMs);
 						backoffMs = Math.min(backoffMs * 2, 2_000);
 						continue;
 					}
-					backoffMs = 250;
+					backoffMs = 100;
 				} else {
 					const events = await client.runEvents(runId, cursor);
 					for (const event of events) handleEvent(event);
-					await sleep(400);
-					if (stopped) return;
+					await sleep(250);
 				}
 
 				const run = await client.getRun(runId);
 				state = run.state;
 				if (terminal(run.state)) {
-					// The terminal state is persisted after the executor's final
-					// event; sweep once more so nothing is missed.
 					const finalEvents = await client.runEvents(runId, cursor);
 					for (const event of finalEvents) handleEvent(event);
 					pi.appendEntry(RUN_BINDING_ENTRY, { version: 1, runId, workspaceId, state: run.state, lastEvent: cursor } satisfies RunBinding);
 					if (run.state !== "succeeded") ui.notify(`Remote Pi run ${run.state}: ${run.error ?? "unknown error"}`, "error");
+					ui.setStatus("scrap-run", undefined);
 					return;
 				}
 				pi.appendEntry(RUN_BINDING_ENTRY, { version: 1, runId, workspaceId, state: run.state, lastEvent: cursor } satisfies RunBinding);
 				ui.setStatus("scrap-run", ui.theme.fg("accent", `run:${run.state}`));
-				if (!useStream) await sleep(400);
 			}
 		} finally {
-			clearInterval(animation);
-			ui.setWidget(RUN_WIDGET_KEY, undefined);
-			ui.setStatus("scrap-run", stopped ? undefined : ui.theme.fg("accent", "run:detached"));
 			if (activeAbort === abort) activeAbort = undefined;
 		}
 	};
 
 	pi.on("session_start", async (_event, ctx) => {
 		stopped = false;
+		restoreTranscript(ctx.sessionManager.getBranch());
+		// Capture the public TUI handle once. Native tool components need it for
+		// their own invalidation, but no persistent widget is required.
+		ctx.ui.setWidget(TUI_CAPTURE_WIDGET_KEY, (nextTui) => {
+			tui = nextTui;
+			return { render: () => [], invalidate: () => {} };
+		});
+		ctx.ui.setWidget(TUI_CAPTURE_WIDGET_KEY, undefined);
 		if (!session.remoteMode) return;
 		try {
 			const readiness = await readRunnerReadiness();
@@ -351,11 +714,14 @@ export function registerDurableRuns(pi: ExtensionAPI, session: WorkspaceSession)
 		}
 		const pending = latestPendingRun(ctx.sessionManager.getBranch());
 		if (pending === undefined || pending.workspaceId !== session.workspaceId) return;
-		ctx.ui.setStatus("scrap-run", "run:reconnecting");
-		void follow(pending.runId, pending.workspaceId, pending.lastEvent, ctx.ui).catch((error) => {
-			ctx.ui.setStatus("scrap-run", "run:detached");
-			ctx.ui.notify(`Remote run continues, but its event stream is unavailable: ${describeError(error)}`, "warning");
-		});
+		const progress = showRunProgress(ctx.ui, (nextTui) => { tui = nextTui; });
+		progress.update("reconnecting");
+		void follow(pending.runId, pending.workspaceId, pending.lastEvent, ctx.ui, progress)
+			.catch((error) => {
+				ctx.ui.setStatus("scrap-run", "run:detached");
+				ctx.ui.notify(`Remote run continues, but its event stream is unavailable: ${describeError(error)}`, "warning");
+			})
+			.finally(progress.close);
 	});
 
 	pi.on("session_shutdown", () => {
@@ -386,13 +752,16 @@ export function registerDurableRuns(pi: ExtensionAPI, session: WorkspaceSession)
 	});
 
 	pi.on("input", async (event, ctx) => {
-		// Inside the worker-side durable runner the agent loop must execute
-		// here; intercepting would re-submit the prompt as another run.
 		if (process.env.SCRAP_DURABLE_RUN === "1") return;
 		if (!session.remoteMode || session.connectedWorkspace === undefined || event.source !== "interactive") return;
 
 		const workspaceId = session.connectedWorkspace.id;
 		const sessionKey = ctx.sessionManager.getSessionId();
+		const branch = ctx.sessionManager.getBranch();
+		// Match vanilla Pi: echo the prompt and show activity synchronously,
+		// before either the create request or runner startup can add latency.
+		pi.appendEntry(RUN_USER_ENTRY, { version: 1, text: event.text });
+		const progress = showRunProgress(ctx.ui, (nextTui) => { tui = nextTui; });
 		try {
 			const readiness = await readRunnerReadiness();
 			const problem = readinessError(readiness);
@@ -401,40 +770,33 @@ export function registerDurableRuns(pi: ExtensionAPI, session: WorkspaceSession)
 				ctx.ui.notify(`Prompt not started: ${problem}`, "error");
 				return { action: "handled" as const };
 			}
-			// The prompt is accepted only after the active local branch has been
-			// durably stored with the run. The worker imports it exactly once, then
-			// owns subsequent conversation state independently of this client.
-			const contextEntryTypes = new Set([
-				"message", "model_change", "thinking_level_change", "compaction",
-				"branch_summary", "custom_message", "session_info",
-			]);
-			let importedParent: string | null = null;
-			const importedBranch: Record<string, unknown>[] = [];
-			for (const value of ctx.sessionManager.getBranch()) {
-				if (typeof value !== "object" || value === null) continue;
-				const entry = value as unknown as Record<string, unknown>;
-				if (typeof entry.type !== "string" || !contextEntryTypes.has(entry.type) || typeof entry.id !== "string") continue;
-				importedBranch.push({ ...entry, parentId: importedParent });
-				importedParent = entry.id;
+			let sessionSnapshot: Record<string, unknown>[] = [];
+			if (sessionNeedsSeed(branch, workspaceId)) {
+				const contextEntryTypes = new Set(["message", "model_change", "thinking_level_change", "compaction", "branch_summary", "custom_message", "session_info"]);
+				let importedParent: string | null = null;
+				const importedBranch: Record<string, unknown>[] = [];
+				for (const value of branch) {
+					if (typeof value !== "object" || value === null) continue;
+					const entry = value as unknown as Record<string, unknown>;
+					if (typeof entry.type !== "string" || !contextEntryTypes.has(entry.type) || typeof entry.id !== "string") continue;
+					importedBranch.push({ ...entry, parentId: importedParent });
+					importedParent = entry.id;
+				}
+				sessionSnapshot = [
+					{ type: "scraps_checkpoint", version: 1, provider: ctx.model?.provider, model: ctx.model?.id, thinkingLevel: ctx.thinkingLevel },
+					...importedBranch,
+				];
 			}
-			const sessionSnapshot = [
-				{
-					type: "scraps_checkpoint",
-					version: 1,
-					provider: ctx.model?.provider,
-					model: ctx.model?.id,
-					thinkingLevel: ctx.thinkingLevel,
-				},
-				...importedBranch,
-			];
+			progress.update("starting");
 			const run = await session.requireClient().createRun(workspaceId, event.text, sessionKey, sessionSnapshot);
-			pi.sendMessage({ customType: "scraps-remote-user", content: event.text, display: true });
 			pi.appendEntry(RUN_BINDING_ENTRY, { version: 1, runId: run.id, workspaceId, state: run.state, lastEvent: 0 } satisfies RunBinding);
 			ctx.ui.setStatus("scrap-run", `run:${run.state}`);
-			await follow(run.id, workspaceId, 0, ctx.ui);
+			await follow(run.id, workspaceId, 0, ctx.ui, progress);
 		} catch (error) {
 			ctx.ui.setStatus("scrap-run", "run:detached");
 			ctx.ui.notify(`Cannot follow durable Pi run: ${describeError(error)}. If it was accepted, it continues on the worker.`, "warning");
+		} finally {
+			progress.close();
 		}
 		return { action: "handled" as const };
 	});

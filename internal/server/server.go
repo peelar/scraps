@@ -62,6 +62,8 @@ type Server struct {
 	runMu               sync.Mutex
 	activeRuns          map[string]string
 	runCancels          map[string]context.CancelFunc
+	runEventMu          sync.Mutex
+	runEventSignals     map[string]chan struct{}
 	modelAuthConfigured bool
 }
 
@@ -109,6 +111,7 @@ func New(config Config) (*Server, error) {
 		cancelRuns:          cancelRuns,
 		activeRuns:          make(map[string]string),
 		runCancels:          make(map[string]context.CancelFunc),
+		runEventSignals:     make(map[string]chan struct{}),
 		modelAuthConfigured: config.ModelAuthConfigured,
 	}
 	if server.runner == nil && config.PiCommand != "" && config.PiExtensionPath != "" {

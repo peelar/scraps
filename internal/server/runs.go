@@ -431,6 +431,9 @@ func (s *Server) executeRun(ctx context.Context, cancel context.CancelFunc, run 
 			return errors.New("remote Pi output exceeds the durable run limit")
 		}
 		_, err := s.store.AppendRunEvent(ctx, run.ID, data)
+		if err == nil {
+			s.signalRunEvent(run.ID)
+		}
 		return err
 	})
 	if err != nil {
@@ -439,9 +442,11 @@ func (s *Server) executeRun(ctx context.Context, cancel context.CancelFunc, run 
 			state = "cancelled"
 		}
 		_ = s.store.FinishRun(context.Background(), run.ID, state, err.Error())
+		s.signalRunEvent(run.ID)
 		return
 	}
 	_ = s.store.FinishRun(context.Background(), run.ID, "succeeded", "")
+	s.signalRunEvent(run.ID)
 }
 
 func (s *Server) getRun(response http.ResponseWriter, request *http.Request) {
@@ -520,6 +525,32 @@ func randomRunID() (string, error) {
 	return "run-" + hex.EncodeToString(value[:]), nil
 }
 
+// runEventSignal returns the current one-shot wakeup channel for a run. The
+// stream obtains it before reading SQLite, so an append can never land in the
+// gap between the read and the wait.
+func (s *Server) runEventSignal(runID string) <-chan struct{} {
+	s.runEventMu.Lock()
+	defer s.runEventMu.Unlock()
+	if signal := s.runEventSignals[runID]; signal != nil {
+		return signal
+	}
+	signal := make(chan struct{})
+	s.runEventSignals[runID] = signal
+	return signal
+}
+
+// signalRunEvent wakes every follower and rotates the one-shot channel. It is
+// called after both event appends and terminal state changes.
+func (s *Server) signalRunEvent(runID string) {
+	s.runEventMu.Lock()
+	signal := s.runEventSignals[runID]
+	delete(s.runEventSignals, runID)
+	s.runEventMu.Unlock()
+	if signal != nil {
+		close(signal)
+	}
+}
+
 // streamRunEvents pushes persisted run events as Server-Sent Events the
 // moment they land, then closes the stream once the run reaches a terminal
 // state. `after` resumes from a client-held sequence cursor, so reconnects
@@ -557,8 +588,6 @@ func (s *Server) streamRunEvents(response http.ResponseWriter, request *http.Req
 	defer deadline.Stop()
 	heartbeat := time.NewTicker(15 * time.Second)
 	defer heartbeat.Stop()
-	poll := time.NewTicker(100 * time.Millisecond)
-	defer poll.Stop()
 
 	sendEvent := func(event store.RunEvent) error {
 		if _, err := fmt.Fprintf(response, "id: %d\ndata: {\"sequence\":%d,\"data\":%s}\n\n", event.Sequence, event.Sequence, event.Data); err != nil {
@@ -569,6 +598,9 @@ func (s *Server) streamRunEvents(response http.ResponseWriter, request *http.Req
 	}
 
 	for {
+		// Subscribe before reading. If an append races with the query it either
+		// appears in this query or closes this channel; neither path waits.
+		wake := s.runEventSignal(runID)
 		events, err := s.store.ListRunEvents(ctx, runID, cursor)
 		if err != nil {
 			return // the client reconnects with its cursor
@@ -580,19 +612,21 @@ func (s *Server) streamRunEvents(response http.ResponseWriter, request *http.Req
 			cursor = event.Sequence
 			deadline.Reset(maxRunDuration)
 		}
-		if len(events) == 0 {
-			// The terminal state is persisted only after the final event, so
-			// an idle poll with a terminal state means the stream is done.
-			run, err := s.store.GetRun(ctx, runID)
-			if err != nil {
-				return
+		if len(events) > 0 {
+			continue // drain an already-persisted burst without waiting
+		}
+		// The terminal state is persisted only after the final event. The
+		// executor signals that state transition, so this check closes promptly.
+		run, err := s.store.GetRun(ctx, runID)
+		if err != nil {
+			return
+		}
+		if run.State == "succeeded" || run.State == "failed" || run.State == "cancelled" {
+			if _, err := fmt.Fprintf(response, "event: done\ndata: %q\n\n", run.State); err == nil {
+				flusher.Flush()
 			}
-			if run.State == "succeeded" || run.State == "failed" || run.State == "cancelled" {
-				if _, err := fmt.Fprintf(response, "event: done\ndata: %q\n\n", run.State); err == nil {
-					flusher.Flush()
-				}
-				return
-			}
+			s.signalRunEvent(runID)
+			return
 		}
 		select {
 		case <-ctx.Done():
@@ -606,7 +640,7 @@ func (s *Server) streamRunEvents(response http.ResponseWriter, request *http.Req
 				return
 			}
 			flusher.Flush()
-		case <-poll.C:
+		case <-wake:
 		}
 	}
 }

@@ -38,7 +38,7 @@ test("blank assistant content mirrors nothing", () => {
 });
 
 test("toolResult message_end mirrors tool name, failure, and truncated output", () => {
-	const long = "x".repeat(9_000);
+	const long = "x".repeat(60_000);
 	const artifacts = artifactsFromEvent(
 		event(5, {
 			type: "message_end",
@@ -57,7 +57,7 @@ test("toolResult message_end mirrors tool name, failure, and truncated output", 
 	if (artifact.kind !== "tool") return;
 	assert.equal(artifact.toolName, "bash");
 	assert.equal(artifact.isError, true);
-	assert.ok(artifact.output.length < 9_000);
+	assert.ok(artifact.output.length < 60_000);
 	assert.ok(artifact.output.endsWith("… (truncated)"));
 });
 
@@ -69,7 +69,7 @@ test("non-message events mirror nothing", () => {
 
 test("thinking deltas drive the activity line", () => {
 	assert.equal(activityFromEvent(event(9, { type: "message_update", assistantMessageEvent: { type: "thinking_delta", delta: "hmm" } })), "thinking");
-	assert.equal(activityFromEvent(event(10, { type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "hello wor" } })), "writing: hello wor");
+	assert.equal(activityFromEvent(event(10, { type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "hello wor" } })), "writing");
 });
 
 test("tool lifecycle drives the activity line", () => {

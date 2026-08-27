@@ -247,7 +247,6 @@ func TestRunEventStreamPushesEventsAndClosesOnTerminalState(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("runner did not start")
 	}
-	close(runner.release)
 
 	api := httptest.NewServer(ts.handler)
 	t.Cleanup(api.Close)
@@ -264,6 +263,9 @@ func TestRunEventStreamPushesEventsAndClosesOnTerminalState(t *testing.T) {
 	if contentType := response.Header.Get("Content-Type"); contentType != "text/event-stream" {
 		t.Fatalf("content type = %q", contentType)
 	}
+	// Headers arrive before the first event. Releasing the runner now verifies
+	// that the append wakes the already-blocked stream without a poll interval.
+	close(runner.release)
 
 	frames := make(chan string, 64)
 	go func() {
