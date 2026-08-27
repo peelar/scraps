@@ -50,37 +50,56 @@ func buildRunnerProfile(root string) ([]byte, runnerProfileManifest, error) {
 	if root == "" {
 		return nil, runnerProfileManifest{}, errors.New("cannot locate the local Pi profile")
 	}
-	allowedRoots := []string{"auth.json", "models.json", "AGENTS.md", "skills", "prompts"}
+	files, err := collectRunnerProfileFiles(root)
+	if err != nil {
+		return nil, runnerProfileManifest{}, err
+	}
+	manifest := buildRunnerProfileManifest(files)
+	archive, err := writeRunnerProfileArchive(files, manifest)
+	if err != nil {
+		return nil, runnerProfileManifest{}, err
+	}
+	return archive, manifest, nil
+}
+
+// runnerProfileAllowedRoots are the only top-level Pi profile entries that are
+// cloned to the worker.
+var runnerProfileAllowedRoots = []string{"auth.json", "models.json", "AGENTS.md", "skills", "prompts"}
+
+// collectRunnerProfileFiles walks the allowed Pi profile surface and returns
+// every regular file as portable bytes. Symlinks anywhere under an allowed
+// root abort the clone: they could redirect the worker to host-only state.
+func collectRunnerProfileFiles(root string) ([]profileFile, error) {
 	var files []profileFile
 	total := 0
-	for _, allowed := range allowedRoots {
+	for _, allowed := range runnerProfileAllowedRoots {
 		base := filepath.Join(root, allowed)
 		info, err := os.Lstat(base)
 		if errors.Is(err, os.ErrNotExist) {
 			continue
 		}
 		if err != nil {
-			return nil, runnerProfileManifest{}, fmt.Errorf("inspect Pi profile %s: %w", allowed, err)
+			return nil, fmt.Errorf("inspect Pi profile %s: %w", allowed, err)
 		}
 		if info.Mode()&os.ModeSymlink != 0 {
-			return nil, runnerProfileManifest{}, fmt.Errorf("Pi profile path %s is a symlink; refusing to clone it", allowed)
+			return nil, fmt.Errorf("refusing to clone symlinked Pi profile path %s", allowed)
 		}
 		err = filepath.WalkDir(base, func(path string, entry fs.DirEntry, walkErr error) error {
 			if walkErr != nil {
 				return walkErr
 			}
 			if entry.Type()&os.ModeSymlink != 0 {
-				return fmt.Errorf("Pi profile path %s is a symlink; refusing to clone it", path)
+				return fmt.Errorf("refusing to clone symlinked Pi profile path %s", path)
 			}
 			if entry.IsDir() {
 				return nil
 			}
 			if !entry.Type().IsRegular() {
-				return fmt.Errorf("Pi profile path %s is not a regular file", path)
+				return fmt.Errorf("unsupported Pi profile entry %s: not a regular file", path)
 			}
 			relative, err := filepath.Rel(root, path)
 			if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
-				return fmt.Errorf("Pi profile path escapes its root: %s", path)
+				return fmt.Errorf("path escapes the Pi profile root: %s", path)
 			}
 			data, err := os.ReadFile(path)
 			if err != nil {
@@ -88,24 +107,30 @@ func buildRunnerProfile(root string) ([]byte, runnerProfileManifest, error) {
 			}
 			if relative == "auth.json" || relative == "models.json" {
 				if err := validatePortableCredentialJSON(data); err != nil {
-					return fmt.Errorf("Pi profile %s is not independently usable on the worker: %w", relative, err)
+					return fmt.Errorf("profile file %s is not independently usable on the worker: %w", relative, err)
 				}
 			}
 			if len(data) > maxRunnerProfileFileBytes {
-				return fmt.Errorf("Pi profile file %s exceeds %d bytes", relative, maxRunnerProfileFileBytes)
+				return fmt.Errorf("profile file %s exceeds %d bytes", relative, maxRunnerProfileFileBytes)
 			}
 			total += len(data)
 			if total > maxRunnerProfileBytes {
-				return fmt.Errorf("Pi runner profile exceeds %d bytes", maxRunnerProfileBytes)
+				return fmt.Errorf("cloned Pi profile exceeds %d bytes", maxRunnerProfileBytes)
 			}
 			files = append(files, profileFile{path: filepath.ToSlash(relative), data: data})
 			return nil
 		})
 		if err != nil {
-			return nil, runnerProfileManifest{}, err
+			return nil, err
 		}
 	}
 	sort.Slice(files, func(i, j int) bool { return files[i].path < files[j].path })
+	return files, nil
+}
+
+// buildRunnerProfileManifest hashes the collected files into a manifest whose
+// generation id changes whenever any file content changes.
+func buildRunnerProfileManifest(files []profileFile) runnerProfileManifest {
 	manifest := runnerProfileManifest{Version: 1, Files: make(map[string]string, len(files))}
 	generationHash := sha256.New()
 	for _, file := range files {
@@ -116,11 +141,16 @@ func buildRunnerProfile(root string) ([]byte, runnerProfileManifest, error) {
 		generationHash.Write(digest[:])
 	}
 	manifest.Generation = hex.EncodeToString(generationHash.Sum(nil))
+	return manifest
+}
+
+// writeRunnerProfileArchive packs the manifest and files into the gzipped tar
+// consumed by scraps-worker profile-install.
+func writeRunnerProfileArchive(files []profileFile, manifest runnerProfileManifest) ([]byte, error) {
 	manifestData, err := json.Marshal(manifest)
 	if err != nil {
-		return nil, runnerProfileManifest{}, err
+		return nil, err
 	}
-
 	var archive bytes.Buffer
 	gzipWriter := gzip.NewWriter(&archive)
 	tarWriter := tar.NewWriter(gzipWriter)
@@ -133,20 +163,20 @@ func buildRunnerProfile(root string) ([]byte, runnerProfileManifest, error) {
 		return err
 	}
 	if err := writeFile("scraps-profile-manifest.json", manifestData); err != nil {
-		return nil, runnerProfileManifest{}, err
+		return nil, err
 	}
 	for _, file := range files {
 		if err := writeFile(file.path, file.data); err != nil {
-			return nil, runnerProfileManifest{}, err
+			return nil, err
 		}
 	}
 	if err := tarWriter.Close(); err != nil {
-		return nil, runnerProfileManifest{}, err
+		return nil, err
 	}
 	if err := gzipWriter.Close(); err != nil {
-		return nil, runnerProfileManifest{}, err
+		return nil, err
 	}
-	return archive.Bytes(), manifest, nil
+	return archive.Bytes(), nil
 }
 
 func validatePortableCredentialJSON(data []byte) error {

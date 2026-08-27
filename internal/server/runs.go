@@ -50,7 +50,51 @@ func (r *commandRunExecutor) Execute(ctx context.Context, request RunRequest, em
 	if err := importSessionSnapshot(sessionDir, request.SessionKey, request.SessionSnapshot); err != nil {
 		return err
 	}
-	args := []string{"--mode", "json", "--session-dir", sessionDir, "-c", "--no-extensions", "-e", r.extensionPath,
+	cmd, stdout, stderr, err := r.startRemotePi(request, checkpoint)
+	if err != nil {
+		return err
+	}
+	// stopRun turns an early output failure into process-tree termination;
+	// without it the child could block on a full stdout pipe and Wait would
+	// never return.
+	runContext, stopRun := context.WithCancel(ctx)
+	defer stopRun()
+
+	stderrDone := make(chan []byte, 1)
+	go func() { data, _ := io.ReadAll(io.LimitReader(stderr, 64<<10)); stderrDone <- data }()
+	processDone := make(chan struct{})
+	go guardProcessGroup(runContext, cmd, processDone)
+
+	output := emitRemotePiOutput(stdout, emit)
+	if output.err != nil {
+		stopRun()
+	}
+	waitErr := cmd.Wait()
+	close(processDone)
+	stderrText := strings.TrimSpace(string(<-stderrDone))
+	if output.err != nil {
+		return output.err
+	}
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	if output.scanError != nil {
+		return fmt.Errorf("read remote Pi output: %w", output.scanError)
+	}
+	if waitErr != nil {
+		if stderrText != "" {
+			return fmt.Errorf("remote Pi: %s", stderrText)
+		}
+		return fmt.Errorf("remote Pi: %w", waitErr)
+	}
+	return nil
+}
+
+// startRemotePi builds and starts one detached remote Pi process in JSON
+// mode. The process gets its own process group so cancellation can kill the
+// whole tree.
+func (r *commandRunExecutor) startRemotePi(request RunRequest, checkpoint sessionCheckpoint) (*exec.Cmd, io.ReadCloser, io.ReadCloser, error) {
+	args := []string{"--mode", "json", "--session-dir", filepath.Join(r.dataDir, "pi-sessions", safeKey(request.SessionKey)), "-c", "--no-extensions", "-e", r.extensionPath,
 		"--scrap", "--workspace", request.WorkspaceID}
 	if checkpoint.Provider != "" {
 		args = append(args, "--provider", checkpoint.Provider)
@@ -72,70 +116,54 @@ func (r *commandRunExecutor) Execute(ctx context.Context, request RunRequest, em
 	)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return err
+		return nil, nil, nil, err
 	}
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
-		return err
+		return nil, nil, nil, err
 	}
 	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("start remote Pi: %w", err)
+		return nil, nil, nil, fmt.Errorf("start remote Pi: %w", err)
 	}
+	return cmd, stdout, stderr, nil
+}
 
-	stderrDone := make(chan []byte, 1)
-	go func() { data, _ := io.ReadAll(io.LimitReader(stderr, 64<<10)); stderrDone <- data }()
-	processContext, stopProcess := context.WithCancel(ctx)
-	defer stopProcess()
-	processDone := make(chan struct{})
-	go func() {
+// guardProcessGroup stops the remote Pi process tree when the run context is
+// cancelled: SIGTERM first, SIGKILL after a short grace period.
+func guardProcessGroup(ctx context.Context, cmd *exec.Cmd, processDone <-chan struct{}) {
+	select {
+	case <-ctx.Done():
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
 		select {
-		case <-processContext.Done():
-			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
-			select {
-			case <-processDone:
-			case <-time.After(2 * time.Second):
-				_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-			}
 		case <-processDone:
+		case <-time.After(2 * time.Second):
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 		}
-	}()
+	case <-processDone:
+	}
+}
 
+// remotePiOutput reports how streaming the child's stdout ended.
+type remotePiOutput struct {
+	err       error // emit failure or invalid JSON
+	scanError error // scanner failure (I/O, oversized line)
+}
+
+// emitRemotePiOutput scans the remote Pi JSON stream and forwards every line
+// to emit. It stops at the first invalid record or emit failure.
+func emitRemotePiOutput(stdout io.Reader, emit func(json.RawMessage) error) remotePiOutput {
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 64<<10), 2<<20)
-	var outputErr error
 	for scanner.Scan() {
 		line := append([]byte(nil), scanner.Bytes()...)
 		if !json.Valid(line) {
-			outputErr = errors.New("remote Pi emitted invalid JSON")
-			stopProcess()
-			break
+			return remotePiOutput{err: errors.New("remote Pi emitted invalid JSON")}
 		}
 		if err := emit(line); err != nil {
-			outputErr = err
-			stopProcess()
-			break
+			return remotePiOutput{err: err}
 		}
 	}
-	scanErr := scanner.Err()
-	waitErr := cmd.Wait()
-	close(processDone)
-	stderrText := strings.TrimSpace(string(<-stderrDone))
-	if outputErr != nil {
-		return outputErr
-	}
-	if ctx.Err() != nil {
-		return ctx.Err()
-	}
-	if scanErr != nil {
-		return fmt.Errorf("read remote Pi output: %w", scanErr)
-	}
-	if waitErr != nil {
-		if stderrText != "" {
-			return fmt.Errorf("remote Pi: %s", stderrText)
-		}
-		return fmt.Errorf("remote Pi: %w", waitErr)
-	}
-	return nil
+	return remotePiOutput{scanError: scanner.Err()}
 }
 
 type sessionCheckpoint struct {
@@ -272,6 +300,48 @@ func responseRun(run store.Run) runResponse {
 		FinishedAt: run.FinishedAt, UpdatedAt: run.UpdatedAt}
 }
 
+// parseCreateRunRequest decodes and validates a create-run body. On invalid
+// input it writes the error response and returns ok=false.
+func (s *Server) parseCreateRunRequest(response http.ResponseWriter, request *http.Request) (createRunRequest, bool) {
+	var input createRunRequest
+	if err := json.NewDecoder(http.MaxBytesReader(response, request.Body, 10<<20)).Decode(&input); err != nil {
+		writeError(response, http.StatusBadRequest, "invalid_request", "body must contain prompt and sessionKey")
+		return input, false
+	}
+	input.Prompt = strings.TrimSpace(input.Prompt)
+	input.SessionKey = strings.TrimSpace(input.SessionKey)
+	if input.Prompt == "" || input.SessionKey == "" {
+		writeError(response, http.StatusBadRequest, "invalid_request", "prompt and sessionKey are required")
+		return input, false
+	}
+	if len(input.Prompt) > maxRunPromptBytes || len(input.SessionKey) > maxSessionKeyBytes || len(input.SessionSnapshot) > maxSessionSnapshotBytes {
+		writeError(response, http.StatusRequestEntityTooLarge, "run_input_too_large", "prompt, sessionKey, or session snapshot exceeds the durable run limit")
+		return input, false
+	}
+	if len(input.SessionSnapshot) == 0 {
+		input.SessionSnapshot = json.RawMessage("[]")
+	}
+	var snapshotEntries []json.RawMessage
+	if err := json.Unmarshal(input.SessionSnapshot, &snapshotEntries); err != nil || len(snapshotEntries) > maxSessionSnapshotEntries {
+		writeError(response, http.StatusBadRequest, "invalid_session_snapshot", "sessionSnapshot must be a bounded array of Pi session entries")
+		return input, false
+	}
+	for _, entry := range snapshotEntries {
+		var envelope struct {
+			Type string `json:"type"`
+		}
+		if json.Unmarshal(entry, &envelope) != nil || envelope.Type == "" || envelope.Type == "session" {
+			writeError(response, http.StatusBadRequest, "invalid_session_snapshot", "sessionSnapshot contains an invalid entry")
+			return input, false
+		}
+	}
+	if _, err := parseSessionCheckpoint(input.SessionSnapshot); err != nil {
+		writeError(response, http.StatusBadRequest, "invalid_session_snapshot", err.Error())
+		return input, false
+	}
+	return input, true
+}
+
 func (s *Server) createRun(response http.ResponseWriter, request *http.Request) {
 	if s.runner == nil {
 		writeError(response, http.StatusServiceUnavailable, "runner_unavailable", "durable Pi runner is not configured on this worker")
@@ -291,40 +361,8 @@ func (s *Server) createRun(response http.ResponseWriter, request *http.Request) 
 		writeError(response, http.StatusConflict, "workspace_not_running", "workspace must be running before starting a run")
 		return
 	}
-	var input createRunRequest
-	if err := json.NewDecoder(http.MaxBytesReader(response, request.Body, 10<<20)).Decode(&input); err != nil {
-		writeError(response, http.StatusBadRequest, "invalid_request", "body must contain prompt and sessionKey")
-		return
-	}
-	input.Prompt = strings.TrimSpace(input.Prompt)
-	input.SessionKey = strings.TrimSpace(input.SessionKey)
-	if input.Prompt == "" || input.SessionKey == "" {
-		writeError(response, http.StatusBadRequest, "invalid_request", "prompt and sessionKey are required")
-		return
-	}
-	if len(input.Prompt) > maxRunPromptBytes || len(input.SessionKey) > maxSessionKeyBytes || len(input.SessionSnapshot) > maxSessionSnapshotBytes {
-		writeError(response, http.StatusRequestEntityTooLarge, "run_input_too_large", "prompt, sessionKey, or session snapshot exceeds the durable run limit")
-		return
-	}
-	if len(input.SessionSnapshot) == 0 {
-		input.SessionSnapshot = json.RawMessage("[]")
-	}
-	var snapshotEntries []json.RawMessage
-	if err := json.Unmarshal(input.SessionSnapshot, &snapshotEntries); err != nil || len(snapshotEntries) > maxSessionSnapshotEntries {
-		writeError(response, http.StatusBadRequest, "invalid_session_snapshot", "sessionSnapshot must be a bounded array of Pi session entries")
-		return
-	}
-	for _, entry := range snapshotEntries {
-		var envelope struct {
-			Type string `json:"type"`
-		}
-		if json.Unmarshal(entry, &envelope) != nil || envelope.Type == "" || envelope.Type == "session" {
-			writeError(response, http.StatusBadRequest, "invalid_session_snapshot", "sessionSnapshot contains an invalid entry")
-			return
-		}
-	}
-	if _, err := parseSessionCheckpoint(input.SessionSnapshot); err != nil {
-		writeError(response, http.StatusBadRequest, "invalid_session_snapshot", err.Error())
+	input, ok := s.parseCreateRunRequest(response, request)
+	if !ok {
 		return
 	}
 

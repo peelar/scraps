@@ -303,28 +303,6 @@ func TestArchiveExportEmptyWorkspace(t *testing.T) {
 	}
 }
 
-func TestCleanArchiveName(t *testing.T) {
-	valid := map[string]string{
-		"a.txt":         "a.txt",
-		"./a.txt":       "a.txt",
-		"dir/sub/f.txt": "dir/sub/f.txt",
-		"dir/":          "dir",
-		"a/./b.txt":     "a/b.txt",
-	}
-	for input, want := range valid {
-		got, err := cleanArchiveName(input)
-		if err != nil || got != want {
-			t.Fatalf("cleanArchiveName(%q) = %q, %v; want %q", input, got, err, want)
-		}
-	}
-	invalid := []string{"", ".", "/", "..", "../x", "a/../../x", ".scrap", ".scrap/tmp/x"}
-	for _, input := range invalid {
-		if _, err := cleanArchiveName(input); err == nil {
-			t.Fatalf("cleanArchiveName(%q) = nil error, want rejection", input)
-		}
-	}
-}
-
 func TestArchiveImportSkipsArchiveRootEntry(t *testing.T) {
 	ts := newTestServer(t)
 	created := ts.createWorkspace(t, workspace.CreateOptions{Project: "demo"})

@@ -17,14 +17,10 @@ import (
 	"io"
 	"io/fs"
 	"os"
-	"path"
 	"path/filepath"
-	"strings"
-)
 
-// scrapInternalDir never crosses the archive boundary in either direction;
-// it is Scraps' own workspace directory.
-const scrapInternalDir = ".scrap"
+	"github.com/peelar/scraps/internal/archive"
+)
 
 func runPush(args []string) int {
 	flags := flag.NewFlagSet("push", flag.ContinueOnError)
@@ -169,7 +165,7 @@ func tarDirectory(source string, w io.Writer) (pushCounts, error) {
 			return nil
 		}
 		relative = filepath.ToSlash(relative)
-		if relative == scrapInternalDir && d.IsDir() {
+		if relative == archive.ReservedDir && d.IsDir() {
 			return fs.SkipDir
 		}
 		if !d.IsDir() && !d.Type().IsRegular() {
@@ -222,7 +218,7 @@ func tarDirectory(source string, w io.Writer) (pushCounts, error) {
 
 // untarArchive extracts a workspace archive into target. Names are validated
 // workspace-relative before joining the target so a hostile archive cannot
-// escape, mirroring the daemon's import rules.
+// escape, using the same rules as the daemon's import path.
 func untarArchive(r io.Reader, target string) (int, error) {
 	files := 0
 	reader := tar.NewReader(r)
@@ -234,7 +230,7 @@ func untarArchive(r io.Reader, target string) (int, error) {
 		if err != nil {
 			return files, err
 		}
-		name, err := cleanLocalArchiveName(header.Name)
+		name, err := archive.CleanEntryName(header.Name)
 		if err != nil {
 			return files, err
 		}
@@ -265,24 +261,4 @@ func untarArchive(r io.Reader, target string) (int, error) {
 			fmt.Fprintf(os.Stderr, "scrap: skipping non-regular archive entry: %s\n", name)
 		}
 	}
-}
-
-// cleanLocalArchiveName applies the same rules as the daemon's import path
-// validation to the pull direction.
-func cleanLocalArchiveName(name string) (string, error) {
-	name = strings.TrimSuffix(name, "/")
-	if name == "" || path.Clean(name) == "." {
-		return "", errors.New("archive entry has an empty name")
-	}
-	if path.IsAbs(name) {
-		return "", errors.New("archive entry is an absolute path: " + name)
-	}
-	clean := path.Clean(name)
-	if clean == ".." || strings.HasPrefix(clean, "../") {
-		return "", errors.New("archive entry escapes the target: " + name)
-	}
-	if clean == scrapInternalDir || strings.HasPrefix(clean, scrapInternalDir+"/") {
-		return "", errors.New("archive entry writes into the reserved .scrap directory: " + name)
-	}
-	return clean, nil
 }

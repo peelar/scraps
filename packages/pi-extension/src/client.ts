@@ -57,7 +57,7 @@ export type GlobInput = {
 	readonly limit?: number;
 };
 
-export type GrepLine = {
+type GrepLine = {
 	readonly n: number;
 	readonly text: string;
 	readonly match: boolean;

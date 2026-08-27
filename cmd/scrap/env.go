@@ -55,106 +55,124 @@ func runEnv(args []string) int {
 	command, names := args[0], flags.Args()
 	switch command {
 	case "list":
-		if len(names) != 0 {
-			fmt.Fprint(os.Stderr, envUsage)
-			return 2
-		}
-		profile, err := loadClientProfile(clientProfilePath())
-		if err != nil {
-			return envError(err)
-		}
-		normalized := normalizedEnvironmentNames(profile.EnvAllow)
-		if len(normalized) == 0 {
-			fmt.Println("No environment variables are approved. Scraps isolates Pi's local environment by default.")
-			return 0
-		}
-		for _, name := range normalized {
-			state := "unset"
-			if _, ok := os.LookupEnv(name); ok {
-				state = "set"
-			}
-			fmt.Printf("%s\t%s\n", name, state)
-		}
-		return 0
+		return runEnvList(names)
 	case "clear":
-		if len(names) != 0 {
-			fmt.Fprint(os.Stderr, envUsage)
-			return 2
-		}
-		profile, err := loadClientProfile(clientProfilePath())
-		if err != nil {
-			return envError(err)
-		}
-		profile.EnvAllow = nil
-		if err := writeClientProfile(clientProfilePath(), profile); err != nil {
-			return envError(err)
-		}
-		fmt.Println("Revoked all Scraps environment approvals. Restart Pi to apply the change.")
-		return 0
+		return runEnvClear(names)
 	case "allow", "deny":
-		if len(names) == 0 {
-			fmt.Fprint(os.Stderr, envUsage)
-			return 2
-		}
-		for _, name := range names {
-			if err := validateEnvironmentName(name); err != nil {
-				return envError(err)
-			}
-		}
-		profile, err := loadClientProfile(clientProfilePath())
-		if err != nil {
-			return envError(err)
-		}
-		approved := make(map[string]bool, len(profile.EnvAllow)+len(names))
-		for _, name := range profile.EnvAllow {
-			if validateEnvironmentName(name) == nil {
-				approved[name] = true
-			}
-		}
-		for _, name := range names {
-			approved[name] = command == "allow"
-		}
-		profile.EnvAllow = profile.EnvAllow[:0]
-		for name, allowed := range approved {
-			if allowed {
-				profile.EnvAllow = append(profile.EnvAllow, name)
-			}
-		}
-		sort.Strings(profile.EnvAllow)
-		if len(profile.EnvAllow) > maxApprovedEnvironmentNames {
-			return envError(fmt.Errorf("at most %d environment variables may be approved", maxApprovedEnvironmentNames))
-		}
-		if err := writeClientProfile(clientProfilePath(), profile); err != nil {
-			return envError(err)
-		}
-		verb := "Approved"
-		if command == "deny" {
-			verb = "Revoked"
-		}
-		fmt.Printf("%s %s for every Scraps workspace.\n", verb, strings.Join(names, ", "))
-		if command == "allow" {
-			var unset []string
-			for _, name := range names {
-				if _, ok := os.LookupEnv(name); !ok {
-					unset = append(unset, name)
-				}
-			}
-			if len(unset) > 0 {
-				fmt.Printf("Not set in this shell: %s.\n", strings.Join(unset, ", "))
-			}
-			fmt.Println("Scraps reads approved values only when Pi starts. Start or restart Pi through your secret manager, for example:")
-			fmt.Println("  op run -- pi")
-			fmt.Println("  doppler run -- pi")
-			fmt.Println("  infisical run -- pi")
-			fmt.Println("Do not paste secret values into Pi or chat.")
-		} else {
-			fmt.Println("Restart Pi to apply the change.")
-		}
-		return 0
+		return runEnvAllowDeny(command, names)
 	default:
 		fmt.Fprint(os.Stderr, envUsage)
 		return 2
 	}
+}
+
+func runEnvList(names []string) int {
+	if len(names) != 0 {
+		fmt.Fprint(os.Stderr, envUsage)
+		return 2
+	}
+	profile, err := loadClientProfile(clientProfilePath())
+	if err != nil {
+		return envError(err)
+	}
+	normalized := normalizedEnvironmentNames(profile.EnvAllow)
+	if len(normalized) == 0 {
+		fmt.Println("No environment variables are approved. Scraps isolates Pi's local environment by default.")
+		return 0
+	}
+	for _, name := range normalized {
+		state := "unset"
+		if _, ok := os.LookupEnv(name); ok {
+			state = "set"
+		}
+		fmt.Printf("%s\t%s\n", name, state)
+	}
+	return 0
+}
+
+func runEnvClear(names []string) int {
+	if len(names) != 0 {
+		fmt.Fprint(os.Stderr, envUsage)
+		return 2
+	}
+	profile, err := loadClientProfile(clientProfilePath())
+	if err != nil {
+		return envError(err)
+	}
+	profile.EnvAllow = nil
+	if err := writeClientProfile(clientProfilePath(), profile); err != nil {
+		return envError(err)
+	}
+	fmt.Println("Revoked all Scraps environment approvals. Restart Pi to apply the change.")
+	return 0
+}
+
+func runEnvAllowDeny(command string, names []string) int {
+	if len(names) == 0 {
+		fmt.Fprint(os.Stderr, envUsage)
+		return 2
+	}
+	for _, name := range names {
+		if err := validateEnvironmentName(name); err != nil {
+			return envError(err)
+		}
+	}
+	profile, err := loadClientProfile(clientProfilePath())
+	if err != nil {
+		return envError(err)
+	}
+	approved := make(map[string]bool, len(profile.EnvAllow)+len(names))
+	for _, name := range profile.EnvAllow {
+		if validateEnvironmentName(name) == nil {
+			approved[name] = true
+		}
+	}
+	for _, name := range names {
+		approved[name] = command == "allow"
+	}
+	profile.EnvAllow = profile.EnvAllow[:0]
+	for name, allowed := range approved {
+		if allowed {
+			profile.EnvAllow = append(profile.EnvAllow, name)
+		}
+	}
+	sort.Strings(profile.EnvAllow)
+	if len(profile.EnvAllow) > maxApprovedEnvironmentNames {
+		return envError(fmt.Errorf("at most %d environment variables may be approved", maxApprovedEnvironmentNames))
+	}
+	if err := writeClientProfile(clientProfilePath(), profile); err != nil {
+		return envError(err)
+	}
+	verb := "Approved"
+	if command == "deny" {
+		verb = "Revoked"
+	}
+	fmt.Printf("%s %s for every Scraps workspace.\n", verb, strings.Join(names, ", "))
+	if command == "allow" {
+		printEnvAllowHints(names)
+	} else {
+		fmt.Println("Restart Pi to apply the change.")
+	}
+	return 0
+}
+
+// printEnvAllowHints reminds the user that values are read only at Pi startup
+// and should come from a secret manager, never from the chat.
+func printEnvAllowHints(names []string) {
+	var unset []string
+	for _, name := range names {
+		if _, ok := os.LookupEnv(name); !ok {
+			unset = append(unset, name)
+		}
+	}
+	if len(unset) > 0 {
+		fmt.Printf("Not set in this shell: %s.\n", strings.Join(unset, ", "))
+	}
+	fmt.Println("Scraps reads approved values only when Pi starts. Start or restart Pi through your secret manager, for example:")
+	fmt.Println("  op run -- pi")
+	fmt.Println("  doppler run -- pi")
+	fmt.Println("  infisical run -- pi")
+	fmt.Println("Do not paste secret values into Pi or chat.")
 }
 
 func validateEnvironmentName(name string) error {

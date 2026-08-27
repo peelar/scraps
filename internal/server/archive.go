@@ -10,20 +10,123 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/peelar/scraps/internal/archive"
 )
 
 const (
 	// maxArchiveBytes bounds one push or pull archive. It protects workspace
 	// disk, not memory: both directions stream.
 	maxArchiveBytes = 1 << 30
-	// internalDir is Scraps' own workspace directory; it never crosses the
-	// archive boundary in either direction.
-	internalDir = ".scrap"
+	// internalDir is omitted from exports and rejected on import; it is
+	// Scraps' own workspace directory.
+	internalDir = archive.ReservedDir
 )
 
 type archiveImportResponse struct {
 	Files int   `json:"files"`
 	Bytes int64 `json:"bytes"`
+}
+
+// archiveRequestError is an HTTP-tagged failure raised while decoding or
+// importing an archive.
+type archiveRequestError struct {
+	status  int
+	code    string
+	message string
+}
+
+func (e *archiveRequestError) Error() string { return e.message }
+
+// writeArchiveError maps an import failure to its response: HTTP-tagged
+// request errors get their status and code, everything else is a provider
+// failure.
+func writeArchiveError(w http.ResponseWriter, err error) {
+	var requestErr *archiveRequestError
+	if errors.As(err, &requestErr) {
+		writeError(w, requestErr.status, requestErr.code, requestErr.message)
+		return
+	}
+	writeProviderError(w, err)
+}
+
+// prepareArchiveImport validates the request prelude: Content-Type, the
+// replace parameter, and the empty-or-replace workspace precondition. It
+// returns the size-bounded request body.
+func (s *Server) prepareArchiveImport(w http.ResponseWriter, r *http.Request, id string) (io.Reader, error) {
+	if got := r.Header.Get("Content-Type"); got != "application/x-tar" {
+		return nil, &archiveRequestError{http.StatusUnsupportedMediaType, "unsupported_media_type",
+			"Content-Type must be application/x-tar"}
+	}
+	replace := false
+	switch r.URL.Query().Get("replace") {
+	case "", "false":
+	case "true":
+		replace = true
+	default:
+		return nil, &archiveRequestError{400, "invalid_request", "replace must be true or false"}
+	}
+	if replace {
+		if err := s.clearWorkspace(r.Context(), id); err != nil {
+			return nil, err
+		}
+	} else {
+		empty, err := s.workspaceIsEmpty(r.Context(), id)
+		if err != nil {
+			return nil, err
+		}
+		if !empty {
+			return nil, &archiveRequestError{http.StatusConflict, "workspace_not_empty",
+				"workspace is not empty; pass replace=true to clear it first"}
+		}
+	}
+	return http.MaxBytesReader(w, r.Body, maxArchiveBytes), nil
+}
+
+// importArchiveEntry writes one tar entry into the workspace. It returns the
+// bytes written for regular files. Client errors come back as
+// *archiveRequestError; anything else is a provider failure.
+func (s *Server) importArchiveEntry(ctx context.Context, id string, header *tar.Header, reader *tar.Reader) (int64, error) {
+	// "tar -C dir ." opens with the archive root itself ("./"); the
+	// workspace root already exists, so skip it rather than reject.
+	if header.Typeflag == tar.TypeDir && path.Clean(strings.TrimSuffix(header.Name, "/")) == "." {
+		return 0, nil
+	}
+	name, err := archive.CleanEntryName(header.Name)
+	if err != nil {
+		return 0, &archiveRequestError{400, "invalid_request", err.Error()}
+	}
+	switch header.Typeflag {
+	case tar.TypeDir:
+		if err := s.provider.Mkdir(ctx, id, name); err != nil {
+			return 0, err
+		}
+	case tar.TypeReg:
+		if header.Size > maxFileBytes {
+			return 0, &archiveRequestError{400, "invalid_request",
+				"archive entry exceeds the 100MB per-file limit: " + name}
+		}
+		content, err := io.ReadAll(io.LimitReader(reader, maxFileBytes+1))
+		if err != nil {
+			var tooLarge *http.MaxBytesError
+			if errors.As(err, &tooLarge) {
+				return 0, &archiveRequestError{http.StatusRequestEntityTooLarge, "archive_too_large",
+					"archive exceeds the 1GiB limit"}
+			}
+			return 0, &archiveRequestError{400, "invalid_request", "unreadable tar entry: " + err.Error()}
+		}
+		if int64(len(content)) != header.Size {
+			return 0, &archiveRequestError{400, "invalid_request", "truncated tar entry: " + name}
+		}
+		if err := s.provider.WriteFile(ctx, id, name, content); err != nil {
+			return 0, err
+		}
+		return int64(len(content)), nil
+	default:
+		return 0, &archiveRequestError{400, "invalid_request",
+			"only regular files and directories may be imported: " + name}
+	}
+	return 0, nil
 }
 
 // archiveImport streams a tar request body into the workspace. It backs the
@@ -34,41 +137,13 @@ func (s *Server) archiveImport(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.lookupWorkspace(w, r); !ok {
 		return
 	}
-	if got := r.Header.Get("Content-Type"); got != "application/x-tar" {
-		writeError(w, http.StatusUnsupportedMediaType, "unsupported_media_type",
-			"Content-Type must be application/x-tar")
-		return
-	}
-	replace := false
-	switch r.URL.Query().Get("replace") {
-	case "", "false":
-	case "true":
-		replace = true
-	default:
-		writeError(w, 400, "invalid_request", "replace must be true or false")
-		return
-	}
-
 	id := r.PathValue("id")
-	if replace {
-		if err := s.clearWorkspace(r.Context(), id); err != nil {
-			writeProviderError(w, err)
-			return
-		}
-	} else {
-		empty, err := s.workspaceIsEmpty(r.Context(), id)
-		if err != nil {
-			writeProviderError(w, err)
-			return
-		}
-		if !empty {
-			writeError(w, http.StatusConflict, "workspace_not_empty",
-				"workspace is not empty; pass replace=true to clear it first")
-			return
-		}
+	body, err := s.prepareArchiveImport(w, r, id)
+	if err != nil {
+		writeArchiveError(w, err)
+		return
 	}
 
-	body := http.MaxBytesReader(w, r.Body, maxArchiveBytes)
 	reader := tar.NewReader(body)
 	var (
 		files int
@@ -89,79 +164,35 @@ func (s *Server) archiveImport(w http.ResponseWriter, r *http.Request) {
 			writeError(w, 400, "invalid_request", "unreadable tar archive: "+err.Error())
 			return
 		}
-		// "tar -C dir ." opens with the archive root itself ("./"); the
-		// workspace root already exists, so skip it rather than reject.
-		if header.Typeflag == tar.TypeDir && path.Clean(strings.TrimSuffix(header.Name, "/")) == "." {
-			continue
-		}
-		name, err := cleanArchiveName(header.Name)
-		if err != nil {
-			writeError(w, 400, "invalid_request", err.Error())
+		written, entryErr := s.importArchiveEntry(r.Context(), id, header, reader)
+		if entryErr != nil {
+			writeArchiveError(w, entryErr)
 			return
 		}
-		switch header.Typeflag {
-		case tar.TypeDir:
-			if err := s.provider.Mkdir(r.Context(), id, name); err != nil {
-				writeProviderError(w, err)
-				return
-			}
-		case tar.TypeReg:
-			if header.Size > maxFileBytes {
-				writeError(w, 400, "invalid_request",
-					"archive entry exceeds the 100MB per-file limit: "+name)
-				return
-			}
-			content, err := io.ReadAll(io.LimitReader(reader, maxFileBytes+1))
-			if err != nil {
-				var tooLarge *http.MaxBytesError
-				if errors.As(err, &tooLarge) {
-					writeError(w, http.StatusRequestEntityTooLarge, "archive_too_large",
-						"archive exceeds the 1GiB limit")
-					return
-				}
-				writeError(w, 400, "invalid_request", "unreadable tar entry: "+err.Error())
-				return
-			}
-			if int64(len(content)) != header.Size {
-				writeError(w, 400, "invalid_request", "truncated tar entry: "+name)
-				return
-			}
-			if err := s.provider.WriteFile(r.Context(), id, name, content); err != nil {
-				writeProviderError(w, err)
-				return
-			}
+		if header.Typeflag == tar.TypeReg {
 			files++
-			bytes += int64(len(content))
-		default:
-			writeError(w, 400, "invalid_request",
-				"only regular files and directories may be imported: "+name)
-			return
+			bytes += written
 		}
 	}
 	writeJSON(w, http.StatusOK, archiveImportResponse{Files: files, Bytes: bytes})
 }
 
-// archiveExport streams the workspace as a tar response. It backs the explicit
-// directory pull (ADR 0014). Oversized or non-regular entries are skipped and
-// reported in X-Scraps-Skipped-Entries before the body starts.
-func (s *Server) archiveExport(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.lookupWorkspace(w, r); !ok {
-		return
-	}
-	id := r.PathValue("id")
+// archiveEntry is one workspace entry staged for export.
+type archiveEntry struct {
+	name  string
+	dir   bool
+	size  int64
+	mode  int64
+	mtime time.Time
+}
 
-	type entry struct {
-		name  string
-		dir   bool
-		size  int64
-		mode  int64
-		mtime time.Time
-	}
-	var entries []entry
-	skipped := 0
+// collectWorkspaceEntries walks the workspace depth-first and stages every
+// exportable entry. Oversized or non-regular entries are skipped and counted
+// so the response can report them before the body starts.
+func (s *Server) collectWorkspaceEntries(ctx context.Context, id string) (entries []archiveEntry, skipped int, err error) {
 	var walk func(dir string) error
 	walk = func(dir string) error {
-		names, err := s.provider.ReadDir(r.Context(), id, dir)
+		names, err := s.provider.ReadDir(ctx, id, dir)
 		if err != nil {
 			return err
 		}
@@ -173,13 +204,13 @@ func (s *Server) archiveExport(w http.ResponseWriter, r *http.Request) {
 			if relative == internalDir || strings.HasPrefix(relative, internalDir+"/") {
 				continue
 			}
-			info, err := s.provider.Stat(r.Context(), id, relative)
+			info, err := s.provider.Stat(ctx, id, relative)
 			if err != nil {
 				return err
 			}
 			switch {
 			case info.IsDir():
-				entries = append(entries, entry{name: relative, dir: true, mtime: info.ModTime()})
+				entries = append(entries, archiveEntry{name: relative, dir: true, mtime: info.ModTime()})
 				if err := walk(relative); err != nil {
 					return err
 				}
@@ -188,7 +219,7 @@ func (s *Server) archiveExport(w http.ResponseWriter, r *http.Request) {
 					skipped++
 					continue
 				}
-				entries = append(entries, entry{
+				entries = append(entries, archiveEntry{
 					name: relative, size: info.Size(),
 					mode: int64(info.Mode().Perm()), mtime: info.ModTime(),
 				})
@@ -198,7 +229,20 @@ func (s *Server) archiveExport(w http.ResponseWriter, r *http.Request) {
 		}
 		return nil
 	}
-	if err := walk("."); err != nil {
+	err = walk(".")
+	return entries, skipped, err
+}
+
+// archiveExport streams the workspace as a tar response. It backs the explicit
+// directory pull (ADR 0014). Oversized or non-regular entries are skipped and
+// reported in X-Scraps-Skipped-Entries before the body starts.
+func (s *Server) archiveExport(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.lookupWorkspace(w, r); !ok {
+		return
+	}
+	id := r.PathValue("id")
+	entries, skipped, err := s.collectWorkspaceEntries(r.Context(), id)
+	if err != nil {
 		writeProviderError(w, err)
 		return
 	}
@@ -261,28 +305,4 @@ func (s *Server) clearWorkspace(ctx context.Context, id string) error {
 		}
 	}
 	return nil
-}
-
-// cleanArchiveName validates a tar entry name as a workspace-relative path.
-// Absolute paths, parent traversals, empty names, and Scraps' internal
-// directory are rejected.
-func cleanArchiveName(name string) (string, error) {
-	name = strings.TrimSuffix(name, "/")
-	if name == "" {
-		return "", errors.New("archive entry has an empty name")
-	}
-	if path.IsAbs(name) {
-		return "", errors.New("archive entry is an absolute path: " + name)
-	}
-	clean := path.Clean(name)
-	if clean == "." {
-		return "", errors.New("archive entry has an empty name")
-	}
-	if clean == ".." || strings.HasPrefix(clean, "../") {
-		return "", errors.New("archive entry escapes the workspace: " + name)
-	}
-	if clean == internalDir || strings.HasPrefix(clean, internalDir+"/") {
-		return "", errors.New("archive entry writes into the reserved .scrap directory: " + name)
-	}
-	return clean, nil
 }

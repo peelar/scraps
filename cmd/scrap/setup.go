@@ -50,7 +50,7 @@ func runSetup(args []string) int {
 		return setupError(err)
 	}
 	if err := runQuietCommand(ctx, "docker", "info"); err != nil {
-		return setupError(fmt.Errorf("Docker is not ready: %w", err))
+		return setupError(fmt.Errorf("cannot reach the docker daemon: %w", err))
 	}
 	if err := ensureOpenShell(ctx); err != nil {
 		return setupError(err)

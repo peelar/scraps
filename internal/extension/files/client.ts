@@ -57,7 +57,7 @@ export type GlobInput = {
 	readonly limit?: number;
 };
 
-export type GrepLine = {
+type GrepLine = {
 	readonly n: number;
 	readonly text: string;
 	readonly match: boolean;
@@ -325,6 +325,37 @@ export class ScrapdClient {
 			{ path: workspaceRelativePath(path) },
 		);
 		return body.entries ?? [];
+	}
+
+	/** Result of an archive import (ADR 0014 directory push). */
+	async pushArchive(
+		id: string,
+		archive: ReadableStream<Uint8Array> | Uint8Array,
+		replace = false,
+	): Promise<{ files: number; bytes: number }> {
+		let response: Response;
+		try {
+			response = await fetch(
+				`${this.baseUrl}/v1/workspaces/${encodeURIComponent(id)}/files/archive${replace ? "?replace=true" : ""}`,
+				{
+					method: "POST",
+					headers: {
+						"Content-Type": "application/x-tar",
+						...(this.token === undefined ? {} : { Authorization: `Bearer ${this.token}` }),
+					},
+					body: archive,
+					// undici requires half-duplex for streaming request bodies.
+					...(archive instanceof Uint8Array ? {} : { duplex: "half" }),
+				} as RequestInit,
+			);
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			throw new ScrapsConnectionError(`cannot reach scrapd at ${this.baseUrl}: ${message}`);
+		}
+		if (!response.ok) {
+			throw await ScrapdApiError.from(response);
+		}
+		return (await response.json()) as { files: number; bytes: number };
 	}
 
 	async glob(id: string, input: GlobInput): Promise<string[]> {

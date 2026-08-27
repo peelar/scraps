@@ -141,7 +141,7 @@ export function createRemoteFindOps(session: WorkspaceSession): FindOperations {
 	};
 }
 
-export type RemoteGrepDetails = {
+type RemoteGrepDetails = {
 	truncation?: ReturnType<typeof truncateHead>;
 	matchLimitReached?: number;
 	linesTruncated?: boolean;
@@ -232,7 +232,7 @@ export async function runRemoteGrep(
 }
 
 /** Render a workspace-relative API path under the stable virtual root. */
-export function displayPath(path: string, root: string): string {
+function displayPath(path: string, root: string): string {
 	if (path === "" || path === ".") return root;
 	if (path.startsWith("/")) return path;
 	return `${root}/${path.replace(/^\.\//, "")}`;
@@ -293,5 +293,3 @@ async function remote<T>(
 ): Promise<T> {
 	return operation(session.requireWorkspace(), session.requireClient());
 }
-
-export type { GrepInput, GrepMatch };

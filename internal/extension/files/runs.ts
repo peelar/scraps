@@ -3,7 +3,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { RunEvent, RunRecord } from "./client.ts";
 import { describeError, type WorkspaceSession } from "./workspace.ts";
 
-export const RUN_BINDING_ENTRY = "scraps-run-v1";
+const RUN_BINDING_ENTRY = "scraps-run-v1";
 
 type RunBinding = {
 	readonly version: 1;

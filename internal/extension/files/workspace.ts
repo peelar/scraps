@@ -302,7 +302,7 @@ export function statusText(session: WorkspaceSession): string | undefined {
 }
 
 /** Ports as `:5173, :3000` for status lines and hints. */
-export function formatPorts(ports: readonly number[]): string {
+function formatPorts(ports: readonly number[]): string {
 	return ports.map((port) => `:${port}`).join(", ");
 }
 
