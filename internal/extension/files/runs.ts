@@ -1,4 +1,6 @@
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ThemeColor } from "@earendil-works/pi-coding-agent";
+import { getMarkdownTheme } from "@earendil-works/pi-coding-agent";
+import { Box, Markdown, Text } from "@earendil-works/pi-tui";
 
 import type { RunEvent, RunRecord } from "./client.ts";
 import { describeError, type WorkspaceSession } from "./workspace.ts";
@@ -27,6 +29,61 @@ function latestPendingRun(entries: readonly unknown[]): RunBinding | undefined {
 	return result;
 }
 
+/** Spinner frames for the live run indicator; native-like braille rotation. */
+const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+const RUN_WIDGET_KEY = "scrap-run";
+
+/** UI surface follow() needs; satisfied by the interactive extension context. */
+type RunUi = {
+	setStatus: (key: string, text: string | undefined) => void;
+	setWidget: (key: string, lines: string[] | undefined) => void;
+	notify: (message: string, level: "info" | "warning" | "error") => void;
+	theme: { fg: (color: ThemeColor, text: string) => string };
+};
+
+function elapsedLabel(startedAt: number): string {
+	const totalSeconds = Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
+	if (totalSeconds < 60) return `${totalSeconds}s`;
+	const minutes = Math.floor(totalSeconds / 60);
+	return `${minutes}m${String(totalSeconds % 60).padStart(2, "0")}s`;
+}
+
+/** Custom message content arrives as a string or content blocks; flatten it. */
+function textContent(content: unknown): string {
+	if (typeof content === "string") return content;
+	if (!Array.isArray(content)) return "";
+	return content
+		.map((part) =>
+			typeof part === "object" && part !== null && "type" in part && part.type === "text" && "text" in part
+				? String(part.text)
+				: "",
+		)
+		.join("");
+}
+
+/**
+ * Render remote mirrors distinctly from local traffic: the user echo is
+ * muted, while the assistant reply gets an accent label and native-style
+ * markdown body so it reads like a real answer, not another prompt.
+ */
+function registerRunRenderers(pi: ExtensionAPI): void {
+	pi.registerMessageRenderer("scraps-remote-user", (message, { outputPad }, theme) => {
+		const text = [
+			theme.fg("muted", "[remote user]"),
+			"",
+		theme.fg("userMessageText", textContent(message.content)),
+		].join("\n");
+		return new Text(text, outputPad, 0);
+	});
+	pi.registerMessageRenderer("scraps-remote-assistant", (message, { outputPad }, theme) => {
+		const box = new Box(outputPad, 0);
+		box.addChild(new Text(theme.fg("accent", "[remote assistant]"), 0, 0));
+		box.addChild(new Text("", 0, 0));
+		box.addChild(new Markdown(textContent(message.content), outputPad, 0, getMarkdownTheme()));
+		return box;
+	});
+}
+
 function terminal(state: RunRecord["state"]): boolean {
 	return state === "succeeded" || state === "failed" || state === "cancelled";
 }
@@ -53,6 +110,8 @@ export function registerDurableRuns(pi: ExtensionAPI, session: WorkspaceSession)
 	let runnerReadiness: { durableRuns: boolean; modelAuth: boolean } | undefined;
 	let stopped = false;
 
+	registerRunRenderers(pi);
+
 	const readRunnerReadiness = async (): Promise<{ durableRuns: boolean; modelAuth: boolean }> => {
 		if (runnerReadiness?.durableRuns === true && runnerReadiness.modelAuth === true) return runnerReadiness;
 		const features = (await session.requireClient().info()).features;
@@ -77,9 +136,15 @@ export function registerDurableRuns(pi: ExtensionAPI, session: WorkspaceSession)
 		runId: string,
 		workspaceId: string,
 		after: number,
-		ui: { setStatus: (key: string, text: string | undefined) => void; notify: (message: string, level: "info" | "warning" | "error") => void },
+		ui: RunUi,
 	): Promise<void> => {
 		let cursor = after;
+		const startedAt = Date.now();
+		let frameIndex = 0;
+		const showProgress = (state: string) => {
+			const dot = SPINNER_FRAMES[frameIndex++ % SPINNER_FRAMES.length];
+			ui.setWidget(RUN_WIDGET_KEY, [ui.theme.fg("accent", `${dot} remote pi · ${state} · ${elapsedLabel(startedAt)}`)]);
+		};
 		while (!stopped) {
 			const events = await session.requireClient().runEvents(runId, cursor);
 			for (const event of events) {
@@ -99,11 +164,13 @@ export function registerDurableRuns(pi: ExtensionAPI, session: WorkspaceSession)
 			}
 			pi.appendEntry(RUN_BINDING_ENTRY, { version: 1, runId, workspaceId, state: run.state, lastEvent: cursor } satisfies RunBinding);
 			if (terminal(run.state)) {
+				ui.setWidget(RUN_WIDGET_KEY, undefined);
 				ui.setStatus("scrap-run", undefined);
 				if (run.state !== "succeeded") ui.notify(`Remote Pi run ${run.state}: ${run.error ?? "unknown error"}`, "error");
 				return;
 			}
-			ui.setStatus("scrap-run", `run:${run.state}`);
+			ui.setStatus("scrap-run", ui.theme.fg("accent", `run:${run.state}`));
+			showProgress(run.state);
 			await new Promise((resolve) => setTimeout(resolve, 500));
 		}
 	};
