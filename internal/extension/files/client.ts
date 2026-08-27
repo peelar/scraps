@@ -122,6 +122,12 @@ type ExecEvent =
 
 type ExitEvent = Extract<ExecEvent, { type: "exit" }>;
 
+/** Envelope the daemon sends for each streamed run event (SSE `data`). */
+type RunEventEnvelope = {
+	readonly sequence: number;
+	readonly data: Record<string, unknown>;
+};
+
 export const DEFAULT_DAEMON_URL = "http://127.0.0.1:8484";
 export const VIRTUAL_WORKSPACE_ROOT = "/workspace";
 export const REQUIRED_PATH_CONTRACT = "workspace-relative-v1";
@@ -146,7 +152,7 @@ export class ScrapdClient {
 		this.token = token;
 	}
 
-	async info(): Promise<{ name: string; version: string; provider?: string; features?: { durableRuns?: boolean; modelAuth?: boolean } }> {
+	async info(): Promise<{ name: string; version: string; provider?: string; features?: { durableRuns?: boolean; modelAuth?: boolean; runEventStream?: boolean } }> {
 		return this.json("GET", "/v1/info");
 	}
 
@@ -208,6 +214,73 @@ export class ScrapdClient {
 
 	async cancelRun(id: string): Promise<void> {
 		await this.request("POST", `/v1/runs/${encodeURIComponent(id)}/cancel`);
+	}
+
+	/**
+	 * Consume the daemon's SSE stream for a run, invoking `onEvent` for every
+	 * persisted event as it lands. Resolves when the server closes the stream
+	 * (the run reached a terminal state) and swallows deliberate aborts. Callers
+	 * resume after a drop by calling again with the last seen sequence.
+	 */
+	async streamEvents(
+		id: string,
+		after: number,
+		onEvent: (envelope: RunEventEnvelope) => void,
+		signal?: AbortSignal,
+	): Promise<void> {
+		const response = await this.request(
+			"GET",
+			`/v1/runs/${encodeURIComponent(id)}/events/stream?after=${encodeURIComponent(String(after))}`,
+			undefined,
+			signal,
+		);
+		if (signal?.aborted) return;
+		if (!response.ok) {
+			throw await ScrapdApiError.from(response);
+		}
+		if (response.body === null) {
+			throw new ScrapdApiError(response.status, "scrapd event stream returned no body");
+		}
+
+		const decoder = new TextDecoder();
+		let buffer = "";
+		const dispatch = (block: string) => {
+			const data = block
+				.split("\n")
+				.filter((line) => line.startsWith("data:"))
+				.map((line) => line.slice(5).trimStart())
+				.join("\n");
+			if (data.length === 0) return;
+			let parsed: unknown;
+			try {
+				parsed = JSON.parse(data);
+			} catch {
+				return; // a malformed frame must not kill the stream
+			}
+			const record = parsed as { sequence?: unknown; data?: unknown };
+			if (typeof record.sequence !== "number" || typeof record.data !== "object" || record.data === null) return;
+			onEvent({ sequence: record.sequence, data: record.data as Record<string, unknown> });
+		};
+
+		const reader = response.body.getReader();
+		try {
+			for (;;) {
+				const { done, value } = await reader.read();
+				if (done) break;
+				buffer += decoder.decode(value, { stream: true });
+				let boundary = buffer.search(/\r\n\r\n|\n\n/);
+				while (boundary !== -1) {
+					const separatorLength = buffer.startsWith("\r\n\r\n", boundary) ? 4 : 2;
+					dispatch(buffer.slice(0, boundary));
+					buffer = buffer.slice(boundary + separatorLength);
+					boundary = buffer.search(/\r\n\r\n|\n\n/);
+				}
+			}
+			buffer += decoder.decode();
+			if (buffer.trim().length > 0) dispatch(buffer);
+		} finally {
+			reader.cancel().catch(() => {});
+		}
 	}
 
 	/**

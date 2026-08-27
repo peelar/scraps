@@ -1,9 +1,11 @@
 package server
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -218,5 +220,159 @@ func TestRunAPIIsExplicitlyUnavailableWithoutRunner(t *testing.T) {
 	}, "")
 	if response.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d: %s", response.Code, response.Body.String())
+	}
+}
+
+// The SSE stream must deliver persisted events the moment they land and
+// close the connection once the run settles; clients rely on both to render
+// live progress and to stop following.
+func TestRunEventStreamPushesEventsAndClosesOnTerminalState(t *testing.T) {
+	runner := &recordingRunner{started: make(chan RunRequest, 1), release: make(chan struct{})}
+	ts := newRunTestServer(t, runner)
+	ws := ts.createWorkspace(t, workspace.CreateOptions{Project: "demo"})
+
+	createdResponse := ts.do(t, http.MethodPost, "/v1/workspaces/"+ws.ID+"/runs", map[string]any{
+		"prompt": "stream please", "sessionKey": "local-session-1",
+	}, "")
+	if createdResponse.Code != http.StatusAccepted {
+		t.Fatalf("create = %d: %s", createdResponse.Code, createdResponse.Body.String())
+	}
+	var created runResponse
+	if err := json.NewDecoder(createdResponse.Body).Decode(&created); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case <-runner.started:
+	case <-time.After(time.Second):
+		t.Fatal("runner did not start")
+	}
+	close(runner.release)
+
+	api := httptest.NewServer(ts.handler)
+	t.Cleanup(api.Close)
+
+	request, err := http.NewRequest(http.MethodGet, api.URL+"/v1/runs/"+created.ID+"/events/stream?after=0", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := api.Client().Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if contentType := response.Header.Get("Content-Type"); contentType != "text/event-stream" {
+		t.Fatalf("content type = %q", contentType)
+	}
+
+	frames := make(chan string, 64)
+	go func() {
+		defer close(frames)
+		scanner := bufio.NewScanner(response.Body)
+		for scanner.Scan() {
+			frames <- scanner.Text()
+			if strings.HasPrefix(scanner.Text(), "event: done") {
+				return
+			}
+		}
+	}()
+
+	var sawEventID, sawEventData, sawDone bool
+	deadline := time.After(5 * time.Second)
+	for {
+		select {
+		case frame, ok := <-frames:
+			if !ok {
+				t.Fatalf("stream ended before done frame (sawEventID=%v sawEventData=%v sawDone=%v)", sawEventID, sawEventData, sawDone)
+			}
+			switch {
+			case strings.HasPrefix(frame, "id: "):
+				sawEventID = true
+			case strings.HasPrefix(frame, `data: {"sequence":1,"data":`):
+				if !strings.Contains(frame, "message_end") {
+					t.Fatalf("event frame = %q", frame)
+				}
+				sawEventData = true
+			case frame == "event: done":
+				sawDone = true
+			}
+			if sawDone {
+				if !sawEventID || !sawEventData {
+					t.Fatalf("stream closed without full payload (id=%v data=%v)", sawEventID, sawEventData)
+				}
+				return
+			}
+		case <-deadline:
+			t.Fatalf("timed out waiting for done frame (sawEventID=%v sawEventData=%v sawDone=%v)", sawEventID, sawEventData, sawDone)
+		}
+	}
+}
+
+// A reconnecting client resumes exactly at its cursor: no replay of already
+// seen events, and the stream still terminates once the run settles.
+func TestRunEventStreamResumesFromCursor(t *testing.T) {
+	runner := &recordingRunner{started: make(chan RunRequest, 1), release: make(chan struct{})}
+	ts := newRunTestServer(t, runner)
+	ws := ts.createWorkspace(t, workspace.CreateOptions{Project: "demo"})
+	createdResponse := ts.do(t, http.MethodPost, "/v1/workspaces/"+ws.ID+"/runs", map[string]any{
+		"prompt": "resume please", "sessionKey": "local-session-1",
+	}, "")
+	var created runResponse
+	if err := json.NewDecoder(createdResponse.Body).Decode(&created); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-runner.started:
+	case <-time.After(time.Second):
+		t.Fatal("runner did not start")
+	}
+	close(runner.release)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		response := ts.do(t, http.MethodGet, "/v1/runs/"+created.ID, nil, "")
+		var run runResponse
+		if err := json.NewDecoder(response.Body).Decode(&run); err != nil {
+			t.Fatal(err)
+		}
+		if run.State == "succeeded" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("run stayed %s", run.State)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	api := httptest.NewServer(ts.handler)
+	t.Cleanup(api.Close)
+	request, err := http.NewRequest(http.MethodGet, api.URL+"/v1/runs/"+created.ID+"/events/stream?after=1", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := api.Client().Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+
+	scanner := bufio.NewScanner(response.Body)
+	sawReplay := false
+	sawDone := false
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.HasPrefix(line, "data: {\"sequence\":1,") {
+			sawReplay = true
+		}
+		if line == "event: done" {
+			sawDone = true
+			break
+		}
+	}
+	if sawReplay {
+		t.Fatal("stream replayed events at or before the cursor")
+	}
+	if !sawDone {
+		t.Fatal("stream did not terminate after the run settled")
 	}
 }

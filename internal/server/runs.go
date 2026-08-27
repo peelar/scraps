@@ -474,15 +474,26 @@ func (s *Server) cancelRun(response http.ResponseWriter, request *http.Request) 
 	writeJSON(response, http.StatusAccepted, map[string]string{"id": run.ID, "state": "cancelling"})
 }
 
-func (s *Server) listRunEvents(response http.ResponseWriter, request *http.Request) {
+// runAfterSequence parses the `after` cursor shared by the run-event API and
+// its streaming variant.
+func runAfterSequence(request *http.Request) (int64, bool) {
 	after := int64(0)
-	if raw := request.URL.Query().Get("after"); raw != "" {
-		value, err := strconv.ParseInt(raw, 10, 64)
-		if err != nil || value < 0 {
-			writeError(response, http.StatusBadRequest, "invalid_after", "after must be a non-negative integer")
-			return
-		}
-		after = value
+	raw := request.URL.Query().Get("after")
+	if raw == "" {
+		return after, true
+	}
+	value, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || value < 0 {
+		return 0, false
+	}
+	return value, true
+}
+
+func (s *Server) listRunEvents(response http.ResponseWriter, request *http.Request) {
+	after, ok := runAfterSequence(request)
+	if !ok {
+		writeError(response, http.StatusBadRequest, "invalid_after", "after must be a non-negative integer")
+		return
 	}
 	events, err := s.store.ListRunEvents(request.Context(), request.PathValue("id"), after)
 	if err != nil {
@@ -507,4 +518,95 @@ func randomRunID() (string, error) {
 		return "", err
 	}
 	return "run-" + hex.EncodeToString(value[:]), nil
+}
+
+// streamRunEvents pushes persisted run events as Server-Sent Events the
+// moment they land, then closes the stream once the run reaches a terminal
+// state. `after` resumes from a client-held sequence cursor, so reconnects
+// (network blips, daemon restarts) replay exactly the missed tail.
+func (s *Server) streamRunEvents(response http.ResponseWriter, request *http.Request) {
+	after, ok := runAfterSequence(request)
+	if !ok {
+		writeError(response, http.StatusBadRequest, "invalid_after", "after must be a non-negative integer")
+		return
+	}
+	runID := request.PathValue("id")
+	if _, err := s.store.GetRun(request.Context(), runID); err != nil {
+		writeAPIError(response, err)
+		return
+	}
+	flusher, ok := response.(http.Flusher)
+	if !ok {
+		writeError(response, http.StatusInternalServerError, "stream_unsupported", "response streaming is unavailable")
+		return
+	}
+	header := response.Header()
+	header.Set("Content-Type", "text/event-stream")
+	header.Set("Cache-Control", "no-cache")
+	header.Set("X-Accel-Buffering", "no")
+	// Flush headers (and an SSE comment) right away so clients and any
+	// intermediaries see an open stream instead of waiting for first data.
+	if _, err := io.WriteString(response, ": stream open\n\n"); err != nil {
+		return
+	}
+	flusher.Flush()
+
+	ctx := request.Context()
+	cursor := after
+	deadline := time.NewTimer(maxRunDuration)
+	defer deadline.Stop()
+	heartbeat := time.NewTicker(15 * time.Second)
+	defer heartbeat.Stop()
+	poll := time.NewTicker(100 * time.Millisecond)
+	defer poll.Stop()
+
+	sendEvent := func(event store.RunEvent) error {
+		if _, err := fmt.Fprintf(response, "id: %d\ndata: {\"sequence\":%d,\"data\":%s}\n\n", event.Sequence, event.Sequence, event.Data); err != nil {
+			return err
+		}
+		flusher.Flush()
+		return nil
+	}
+
+	for {
+		events, err := s.store.ListRunEvents(ctx, runID, cursor)
+		if err != nil {
+			return // the client reconnects with its cursor
+		}
+		for _, event := range events {
+			if err := sendEvent(event); err != nil {
+				return
+			}
+			cursor = event.Sequence
+			deadline.Reset(maxRunDuration)
+		}
+		if len(events) == 0 {
+			// The terminal state is persisted only after the final event, so
+			// an idle poll with a terminal state means the stream is done.
+			run, err := s.store.GetRun(ctx, runID)
+			if err != nil {
+				return
+			}
+			if run.State == "succeeded" || run.State == "failed" || run.State == "cancelled" {
+				if _, err := fmt.Fprintf(response, "event: done\ndata: %q\n\n", run.State); err == nil {
+					flusher.Flush()
+				}
+				return
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-deadline.C:
+			_, _ = io.WriteString(response, "event: done\ndata: \"timeout\"\n\n")
+			flusher.Flush()
+			return
+		case <-heartbeat.C:
+			if _, err := io.WriteString(response, ": keepalive\n\n"); err != nil {
+				return
+			}
+			flusher.Flush()
+		case <-poll.C:
+		}
+	}
 }

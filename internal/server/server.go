@@ -175,6 +175,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /v1/workspaces/{id}/runs", s.requireAuth(s.createRun))
 	mux.HandleFunc("GET /v1/runs/{id}", s.requireAuth(s.getRun))
 	mux.HandleFunc("GET /v1/runs/{id}/events", s.requireAuth(s.listRunEvents))
+	mux.HandleFunc("GET /v1/runs/{id}/events/stream", s.requireAuth(s.streamRunEvents))
 	mux.HandleFunc("POST /v1/runs/{id}/cancel", s.requireAuth(s.cancelRun))
 
 	mux.HandleFunc("GET /v1/workspaces/{id}/ports", s.requireAuth(s.workspacePorts))
@@ -215,8 +216,9 @@ func info(server *Server) http.HandlerFunc {
 			Image:     providerInfo.Image,
 			Policy:    providerInfo.Policy,
 			Features: infoFeatures{
-				DurableRuns: server.runner != nil,
-				ModelAuth:   server.modelAuthConfigured,
+				DurableRuns:    server.runner != nil,
+				ModelAuth:      server.modelAuthConfigured,
+				RunEventStream: server.runner != nil,
 			},
 		})
 	}
@@ -239,6 +241,9 @@ type infoResponse struct {
 type infoFeatures struct {
 	DurableRuns bool `json:"durableRuns"`
 	ModelAuth   bool `json:"modelAuth"`
+	// RunEventStream advertises the SSE run-event stream; clients fall back
+	// to polling when absent.
+	RunEventStream bool `json:"runEventStream"`
 }
 
 // requireAuth enforces the bearer token when one is configured.
