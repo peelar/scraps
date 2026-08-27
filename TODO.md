@@ -284,8 +284,9 @@ the broader Scraps experience:
   to any network.
 - [ ] Browser/Playwright support inside workspaces.
 - [ ] Diff/PR handoff and optional sync back to a local checkout.
-- [ ] Multiple workers or scheduling only after the single-worker flow is
-  dependable.
+- [ ] Multiple workers or schedule-driven agent execution only after the
+  single-worker flow is dependable. The execution-agnostic schedule clock is
+  already available.
 
 ## Recommended implementation order
 

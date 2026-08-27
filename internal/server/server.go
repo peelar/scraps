@@ -15,6 +15,7 @@ import (
 
 	"github.com/peelar/scraps/internal/githubapp"
 	"github.com/peelar/scraps/internal/provider"
+	"github.com/peelar/scraps/internal/schedule"
 	"github.com/peelar/scraps/internal/store"
 	"github.com/peelar/scraps/internal/version"
 	"github.com/peelar/scraps/internal/workspace"
@@ -39,9 +40,10 @@ type Server struct {
 	handler  http.Handler
 	dataDir  string
 	started  time.Time
-	shutdown func()
 	pool     *readyPool
 	github   *githubapp.Manager
+	store    *store.Store
+	clock    *schedule.Engine
 }
 
 // New opens the store under the data dir and builds the HTTP handler.
@@ -53,24 +55,22 @@ func New(config Config) (*Server, error) {
 		return nil, errors.New("server: create data dir")
 	}
 
+	st, err := store.Open(filepath.Join(config.DataDir, "scrapd.db"))
+	if err != nil {
+		return nil, err
+	}
 	runtime := config.Provider
-	shutdown := func() {}
 	if runtime == nil {
-		st, err := store.Open(filepath.Join(config.DataDir, "scrapd.db"))
-		if err != nil {
-			return nil, err
-		}
 		runtime, err = provider.NewOpenShell(context.Background(), st, config.OpenShellImage)
 		if err != nil {
 			st.Close()
 			return nil, err
 		}
-		shutdown = func() { st.Close() }
 	}
 
 	github, err := githubapp.New(config.DataDir)
 	if err != nil {
-		shutdown()
+		st.Close()
 		return nil, err
 	}
 	server := &Server{
@@ -78,9 +78,10 @@ func New(config Config) (*Server, error) {
 		token:    config.Token,
 		dataDir:  config.DataDir,
 		started:  time.Now(),
-		shutdown: shutdown,
 		github:   github,
+		store:    st,
 	}
+	server.clock = schedule.NewEngine(st)
 	server.pool = newReadyPool(runtime)
 	server.handler = server.routes()
 	return server, nil
@@ -89,8 +90,9 @@ func New(config Config) (*Server, error) {
 // Close releases server resources.
 func (s *Server) Close() {
 	s.pool.close()
+	s.clock.Close()
 	s.github.Close()
-	s.shutdown()
+	_ = s.store.Close()
 }
 
 // Handler returns the root HTTP handler.
@@ -107,6 +109,16 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /v1/auth/github/manifest", s.githubManifest)
 	mux.HandleFunc("GET /v1/auth/github/manifest/callback", s.githubManifestCallback)
 	mux.HandleFunc("GET /v1/auth/github/install/callback/{key}", s.githubInstallCallback)
+
+	mux.HandleFunc("POST /v1/schedules", s.requireAuth(s.createSchedule))
+	mux.HandleFunc("GET /v1/schedules", s.requireAuth(s.listSchedules))
+	mux.HandleFunc("GET /v1/schedules/{id}", s.requireAuth(s.getSchedule))
+	mux.HandleFunc("PATCH /v1/schedules/{id}", s.requireAuth(s.updateSchedule))
+	mux.HandleFunc("DELETE /v1/schedules/{id}", s.requireAuth(s.deleteSchedule))
+	mux.HandleFunc("GET /v1/schedule-occurrences", s.requireAuth(s.listScheduleOccurrences))
+	mux.HandleFunc("POST /v1/schedule-occurrences/claim", s.requireAuth(s.claimScheduleOccurrence))
+	mux.HandleFunc("POST /v1/schedule-occurrences/{id}/renew", s.requireAuth(s.renewScheduleOccurrence))
+	mux.HandleFunc("POST /v1/schedule-occurrences/{id}/complete", s.requireAuth(s.completeScheduleOccurrence))
 
 	mux.HandleFunc("POST /v1/workspaces", s.requireAuth(s.createWorkspace))
 	mux.HandleFunc("GET /v1/workspaces", s.requireAuth(s.listWorkspaces))
@@ -211,7 +223,9 @@ func writeAPIError(response http.ResponseWriter, err error) {
 	}
 	switch {
 	case errors.Is(err, store.ErrNotFound):
-		writeError(response, http.StatusNotFound, "not_found", "workspace not found")
+		writeError(response, http.StatusNotFound, "not_found", "resource not found")
+	case errors.Is(err, store.ErrConflict):
+		writeError(response, http.StatusConflict, "conflict", "resource state changed; retry the operation")
 	case errors.Is(err, workspace.ErrOutsideRoot):
 		writeError(response, http.StatusBadRequest, "invalid_path", err.Error())
 	default:

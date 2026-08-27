@@ -156,6 +156,17 @@ rather than individually proxying every local Pi tool indefinitely.
 
 Pi should serve as the concrete specification from which a more generic agent interface can later emerge. Do **not** design a universal agent protocol prematurely. ACP may become relevant later.
 
+## Schedule Clock
+
+Scrapd provides a narrow, durable schedule and occurrence primitive. It owns
+time, missed firings, concurrency policy, occurrence history, and renewable
+consumer leases. Schedule payloads are opaque JSON.
+
+Scraps does **not** interpret a scheduled payload or turn it into a Pi task. A
+separate software-factory harness may later claim occurrences and request
+Scraps compute. This preserves the boundary between compute, time, and workflow
+semantics while avoiding a generic scheduler.
+
 ## What Makes Scraps Good
 
 Prioritize these properties above feature count:
@@ -200,7 +211,7 @@ Chromium/Playwright in every workspace; detect/expose dev-server ports; `scrap o
 **M8 — Handoff**
 Easy diff, PR creation, and optional sync back to a local checkout.
 
-Only after these work well: additional agents, ACP, multiple compute nodes, scheduling, shared organizational compute, or an agentic IDE.
+Only after these work well: additional agents, ACP, multiple compute nodes, schedule-driven agent execution, shared organizational compute, or an agentic IDE.
 
 ## Explicit Non-Goals for Early Versions
 

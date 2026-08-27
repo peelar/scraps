@@ -11,8 +11,12 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// ErrNotFound is returned when a row does not exist.
-var ErrNotFound = errors.New("not found")
+var (
+	// ErrNotFound is returned when a row does not exist.
+	ErrNotFound = errors.New("not found")
+	// ErrConflict is returned when a conditional state transition loses a race.
+	ErrConflict = errors.New("conflict")
+)
 
 // Workspace is the persisted workspace record.
 type Workspace struct {
@@ -64,7 +68,36 @@ CREATE TABLE IF NOT EXISTS workspaces (
 	provider   TEXT NOT NULL DEFAULT 'directory',
 	created_at INTEGER NOT NULL,
 	updated_at INTEGER NOT NULL
-);`)
+);
+CREATE TABLE IF NOT EXISTS schedules (
+	id                 TEXT PRIMARY KEY,
+	name               TEXT NOT NULL,
+	cron_expression    TEXT NOT NULL,
+	timezone           TEXT NOT NULL,
+	enabled            INTEGER NOT NULL,
+	payload            TEXT NOT NULL DEFAULT '{}',
+	concurrency_policy TEXT NOT NULL DEFAULT 'queue',
+	next_run_at        INTEGER,
+	last_run_at        INTEGER,
+	created_at         INTEGER NOT NULL,
+	updated_at         INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS schedule_occurrences (
+	id           TEXT PRIMARY KEY,
+	schedule_id  TEXT NOT NULL REFERENCES schedules(id) ON DELETE CASCADE,
+	scheduled_at INTEGER NOT NULL,
+	state        TEXT NOT NULL DEFAULT 'pending',
+	lease_token  TEXT NOT NULL DEFAULT '',
+	lease_until  INTEGER,
+	attempts     INTEGER NOT NULL DEFAULT 0,
+	error        TEXT NOT NULL DEFAULT '',
+	created_at   INTEGER NOT NULL,
+	updated_at   INTEGER NOT NULL,
+	UNIQUE(schedule_id, scheduled_at)
+);
+CREATE INDEX IF NOT EXISTS schedule_due_idx ON schedules(enabled, next_run_at);
+CREATE INDEX IF NOT EXISTS occurrence_claim_idx ON schedule_occurrences(state, lease_until, scheduled_at);
+PRAGMA foreign_keys = ON;`)
 	if err != nil {
 		return fmt.Errorf("migrate database: %w", err)
 	}

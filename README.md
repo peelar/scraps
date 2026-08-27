@@ -98,6 +98,31 @@ For private repositories and pushes, run `scrap auth github`. It creates a
 private GitHub App and lets you pick which repositories to grant; credentials
 stay in the worker and are never exposed to workspace processes.
 
+## Durable schedules (experimental)
+
+`scrapd` has an execution-agnostic schedule clock. A schedule contains cron,
+timezone, concurrency policy, and an opaque JSON payload—it does not contain a
+repository, prompt, Pi configuration, or workflow.
+
+```bash
+curl -X POST "$SCRAP_DAEMON_URL/v1/schedules" \
+  -H "Authorization: Bearer $SCRAP_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "name": "nightly factory event",
+    "cron": "0 2 * * *",
+    "timezone": "America/Toronto",
+    "concurrencyPolicy": "skip",
+    "payload": {"kind": "nightly-audit"}
+  }'
+```
+
+Due schedules create durable occurrences. A separate software-factory harness
+can claim an occurrence with `POST /v1/schedule-occurrences/claim`, then report
+`completed` or `failed` using its lease token. Expired leases are reclaimable;
+Scraps itself does not execute the payload. See
+[ADR 0011](./docs/adr/0011-durable-execution-agnostic-schedules.md).
+
 ## Environment variables
 
 For software that genuinely requires a raw environment variable, approve its
