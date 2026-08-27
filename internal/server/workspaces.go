@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 
+	"github.com/peelar/scraps/internal/provider"
 	"github.com/peelar/scraps/internal/store"
 	"github.com/peelar/scraps/internal/workspace"
 )
@@ -22,9 +23,13 @@ func (s *Server) createWorkspace(response http.ResponseWriter, request *http.Req
 		return
 	}
 
-	options := workspace.CreateOptions{Project: body.Project, RepoURL: body.RepoURL}
+	repoURL, err := workspace.NormalizeRepoURL(body.RepoURL)
+	if err != nil {
+		writeAPIError(response, workspaceCreationError(err))
+		return
+	}
+	options := workspace.CreateOptions{Project: body.Project, RepoURL: repoURL}
 	var created workspace.Workspace
-	var err error
 	if s.pool != nil {
 		created, err = s.pool.create(request.Context(), options)
 	} else {
@@ -40,6 +45,14 @@ func (s *Server) createWorkspace(response http.ResponseWriter, request *http.Req
 func workspaceCreationError(err error) error {
 	if errors.Is(err, workspace.ErrInvalidRepoURL) {
 		return &apiError{status: http.StatusBadRequest, code: "invalid_request", message: err.Error()}
+	}
+	var authorization *provider.RepositoryAuthorizationRequiredError
+	if errors.As(err, &authorization) {
+		return &apiError{status: http.StatusConflict, code: "repository_auth_required", message: authorization.Error()}
+	}
+	var clone *provider.RepositoryCloneError
+	if errors.As(err, &clone) {
+		return &apiError{status: http.StatusBadGateway, code: "repository_clone_failed", message: clone.Error()}
 	}
 	return err
 }

@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -121,11 +122,9 @@ type CreateOptions struct {
 // Create generates a unique workspace, clones the repository if given, and
 // persists the record.
 func (m *Manager) Create(ctx context.Context, options CreateOptions) (Workspace, error) {
-	repoURL := strings.TrimSpace(options.RepoURL)
-	if repoURL != "" {
-		if err := validateRepoURL(repoURL); err != nil {
-			return Workspace{}, err
-		}
+	repoURL, err := NormalizeRepoURL(options.RepoURL)
+	if err != nil {
+		return Workspace{}, err
 	}
 
 	for attempt := 0; attempt < 8; attempt++ {
@@ -182,18 +181,40 @@ func (m *Manager) clone(ctx context.Context, repoURL, dir string) error {
 // ErrInvalidRepoURL is returned for repository URLs that are not http(s).
 var ErrInvalidRepoURL = errors.New("invalid repo url")
 
-func validateRepoURL(raw string) error {
+// NormalizeRepoURL converts common Git SSH origin forms to HTTPS and validates
+// the provider-neutral repository URL accepted by scrapd. Keeping this at the
+// daemon boundary gives the CLI and Pi extension identical behavior.
+func NormalizeRepoURL(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", nil
+	}
+	if match := regexp.MustCompile(`^[^@/:[:space:]]+@([^/:[:space:]]+):(.+)$`).FindStringSubmatch(raw); match != nil {
+		raw = "https://" + match[1] + "/" + match[2]
+	} else if parsed, err := url.Parse(raw); err == nil && parsed.Scheme == "ssh" {
+		if parsed.Hostname() == "" || strings.TrimPrefix(parsed.Path, "/") == "" {
+			return "", fmt.Errorf("%w: invalid ssh repository URL", ErrInvalidRepoURL)
+		}
+		raw = "https://" + parsed.Hostname() + "/" + strings.TrimPrefix(parsed.Path, "/")
+	}
+
 	parsed, err := url.Parse(raw)
 	if err != nil {
-		return fmt.Errorf("%w: %w", ErrInvalidRepoURL, err)
+		return "", fmt.Errorf("%w: %w", ErrInvalidRepoURL, err)
 	}
 	if parsed.Scheme != "http" && parsed.Scheme != "https" {
-		return fmt.Errorf("%w: scheme must be http or https, got %q", ErrInvalidRepoURL, parsed.Scheme)
+		return "", fmt.Errorf("%w: scheme must be http or https, got %q", ErrInvalidRepoURL, parsed.Scheme)
 	}
 	if parsed.Host == "" {
-		return fmt.Errorf("%w: missing host", ErrInvalidRepoURL)
+		return "", fmt.Errorf("%w: missing host", ErrInvalidRepoURL)
 	}
-	return nil
+	if parsed.User != nil {
+		return "", fmt.Errorf("%w: embedded credentials are not allowed", ErrInvalidRepoURL)
+	}
+	if parsed.RawQuery != "" || parsed.Fragment != "" {
+		return "", fmt.Errorf("%w: query strings and fragments are not allowed", ErrInvalidRepoURL)
+	}
+	return parsed.String(), nil
 }
 
 // Get returns a workspace by ID.

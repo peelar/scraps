@@ -96,7 +96,11 @@ pi
 
 For private repositories and pushes, run `scrap auth github`. It creates a
 private GitHub App and lets you pick which repositories to grant; credentials
-stay in the worker and are never exposed to workspace processes.
+stay in the worker and are never exposed to workspace processes. Repository
+workspaces can be created outside Pi with `scrap new --repo URL [project]`.
+Git SSH/scp origins are normalized to HTTPS by scrapd, and missing authorization
+or clone failures are returned as actionable API errors rather than generic
+internal errors.
 
 ## Durable schedules (experimental)
 

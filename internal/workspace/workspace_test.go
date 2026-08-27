@@ -65,9 +65,28 @@ func TestCreateWithoutRepo(t *testing.T) {
 	}
 }
 
+func TestNormalizeRepoURL(t *testing.T) {
+	for input, want := range map[string]string{
+		"git@github.com:peelar/scraps.git":       "https://github.com/peelar/scraps.git",
+		"ssh://git@github.com/peelar/scraps.git": "https://github.com/peelar/scraps.git",
+		"https://github.com/peelar/scraps.git":   "https://github.com/peelar/scraps.git",
+		"  https://example.com/owner/repo.git  ": "https://example.com/owner/repo.git",
+	} {
+		got, err := NormalizeRepoURL(input)
+		if err != nil || got != want {
+			t.Errorf("NormalizeRepoURL(%q) = %q, %v; want %q", input, got, err, want)
+		}
+	}
+	for _, input := range []string{"file:///tmp/repo", "https://token@example.com/repo", "https://example.com/repo?token=x"} {
+		if _, err := NormalizeRepoURL(input); !errors.Is(err, ErrInvalidRepoURL) {
+			t.Errorf("NormalizeRepoURL(%q) error = %v, want ErrInvalidRepoURL", input, err)
+		}
+	}
+}
+
 func TestCreateRejectsNonHTTPRepo(t *testing.T) {
 	manager := newTestManager(t)
-	for _, repo := range []string{"ssh://git@example.com/repo.git", "file:///repo", "example.com/repo"} {
+	for _, repo := range []string{"ssh:///repo.git", "file:///repo", "example.com/repo"} {
 		if _, err := manager.Create(context.Background(), CreateOptions{RepoURL: repo}); err == nil {
 			t.Fatalf("repo %q accepted", repo)
 		}

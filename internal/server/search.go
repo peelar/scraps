@@ -29,7 +29,7 @@ func (s *Server) fileGlob(w http.ResponseWriter, r *http.Request) {
 	}
 	paths, e := s.provider.Glob(r.Context(), r.PathValue("id"), provider.GlobRequest{Pattern: b.Pattern, Path: b.Path, Limit: b.Limit})
 	if e != nil {
-		writeProviderError(w, e)
+		writePathError(w, e, b.Path)
 		return
 	}
 	if paths == nil {
@@ -63,7 +63,7 @@ func (s *Server) fileGrep(w http.ResponseWriter, r *http.Request) {
 	}
 	result, e := s.provider.Grep(r.Context(), r.PathValue("id"), provider.GrepRequest{Pattern: b.Pattern, Path: b.Path, Glob: b.Glob, IgnoreCase: b.IgnoreCase, Literal: b.Literal, Context: b.Context, Limit: b.Limit})
 	if e != nil {
-		writeProviderError(w, e)
+		writePathError(w, e, b.Path)
 		return
 	}
 	writeJSON(w, 200, result)

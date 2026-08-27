@@ -5,6 +5,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 import { type WorkspaceRecord, ScrapdClient } from "./client.ts";
 import { registerScrapCommands } from "./commands.ts";
+import { ScrapdApiError } from "./errors.ts";
 import type { RemoteConfig, SessionBinding } from "./identity.ts";
 import { WorkspaceSession, statusText } from "./workspace.ts";
 
@@ -26,11 +27,18 @@ afterEach(() => {
 	}
 });
 
-function commandHarness(session: WorkspaceSession) {
+function commandHarness(
+	session: WorkspaceSession,
+	options: {
+		detectRemote?: (cwd: string) => Promise<string | undefined>;
+		confirmAnswer?: boolean;
+	} = {},
+) {
 	const commands = new Map<string, CommandHandler>();
 	const statuses: Array<string | undefined> = [];
 	const notices: Array<{ message: string; level: string }> = [];
 	const bindings: SessionBinding[] = [];
+	const confirms: Array<{ title: string; body: string }> = [];
 	const pi = {
 		registerCommand(name: string, options: { handler: CommandHandler }) {
 			commands.set(name, options.handler);
@@ -44,16 +52,20 @@ function commandHarness(session: WorkspaceSession) {
 		activate,
 		(binding) => bindings.push(binding),
 		() => {},
+		options.detectRemote ?? (async () => undefined),
 	);
 	const ctx = {
 		cwd: "/tmp/project",
 		ui: {
 			notify: (message: string, level: string) => notices.push({ message, level }),
 			setStatus: () => {},
-			confirm: async () => true,
+			confirm: async (title: string, body: string) => {
+				confirms.push({ title, body });
+				return options.confirmAnswer ?? true;
+			},
 		},
 	};
-	return { commands, statuses, notices, bindings, ctx };
+	return { commands, statuses, notices, bindings, confirms, ctx };
 }
 
 function fakeClient(methods: Partial<ScrapdClient>): ScrapdClient {
@@ -93,6 +105,22 @@ describe("/scrap activation", () => {
 		assert.equal(harness.notices.at(-1)?.level, "error");
 	});
 
+	it("shows actionable API errors without a connection hint", async () => {
+		const client = fakeClient({
+			createWorkspace: async () => {
+				throw new ScrapdApiError(409, "repository access to github.com is not configured; run `scrap auth github`", "repository_auth_required");
+			},
+		});
+		const session = new WorkspaceSession(() => client);
+		const harness = commandHarness(session);
+
+		await harness.commands.get("scrap")?.("", harness.ctx);
+
+		const message = harness.notices.at(-1)?.message ?? "";
+		assert.ok(message.includes("scrap auth github"));
+		assert.ok(!message.includes("Check the worker"));
+	});
+
 	it("selects from local mode and persists the session association", async () => {
 		const client = fakeClient({ getWorkspace: async () => record });
 		const session = new WorkspaceSession(() => client);
@@ -108,6 +136,76 @@ describe("/scrap activation", () => {
 			workspaceId: "quiet-river",
 			project: "owner/project",
 		});
+	});
+});
+
+describe("/scrap workspace seeding", () => {
+	// The extension passes the detected origin unchanged; scrapd owns URL
+	// normalization so every client gets identical behavior.
+	const remoteUrl = "git@github.com:peelar/scraps.git";
+
+	it("offers the local origin remote and clones it into a new workspace", async () => {
+		const created: unknown[] = [];
+		const client = fakeClient({
+			createWorkspace: async (input: unknown) => {
+				created.push(input);
+				return record;
+			},
+			readdir: async () => ["README.md"],
+		});
+		const session = new WorkspaceSession(() => client);
+		const harness = commandHarness(session, { detectRemote: async () => remoteUrl });
+
+		await harness.commands.get("scrap")?.("", harness.ctx);
+
+		assert.equal(session.connectedWorkspace?.id, "quiet-river");
+		assert.deepEqual(created, [{ project: "project", repoUrl: remoteUrl }]);
+		assert.equal(harness.confirms.length, 1);
+		assert.ok(harness.confirms[0]?.body.includes(remoteUrl));
+		// A populated workspace does not trigger the empty notice.
+		assert.ok(!harness.notices.some((notice) => notice.message.includes("is empty")));
+	});
+
+	it("respects declining the clone and warns when the workspace is empty", async () => {
+		const created: unknown[] = [];
+		const client = fakeClient({
+			createWorkspace: async (input: unknown) => {
+				created.push(input);
+				return record;
+			},
+			readdir: async () => [".scrap"],
+		});
+		const session = new WorkspaceSession(() => client);
+		const harness = commandHarness(session, {
+			detectRemote: async () => remoteUrl,
+			confirmAnswer: false,
+		});
+
+		await harness.commands.get("scrap")?.("", harness.ctx);
+
+		assert.deepEqual(created, [{ project: "project" }]);
+		assert.equal(harness.confirms.length, 1);
+		const empty = harness.notices.find((notice) => notice.message.includes("is empty"));
+		assert.ok(empty !== undefined, `expected an empty-workspace notice, got ${JSON.stringify(harness.notices)}`);
+		assert.equal(empty?.level, "warning");
+	});
+
+	it("does not prompt outside a git checkout", async () => {
+		const created: unknown[] = [];
+		const client = fakeClient({
+			createWorkspace: async (input: unknown) => {
+				created.push(input);
+				return record;
+			},
+			readdir: async () => [".scrap"],
+		});
+		const session = new WorkspaceSession(() => client);
+		const harness = commandHarness(session); // default detectRemote finds nothing
+
+		await harness.commands.get("scrap")?.("", harness.ctx);
+
+		assert.deepEqual(created, [{ project: "project" }]);
+		assert.equal(harness.confirms.length, 0);
 	});
 });
 

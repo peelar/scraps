@@ -60,7 +60,7 @@ func (s *Server) fileRead(w http.ResponseWriter, r *http.Request) {
 	}
 	content, info, e := s.provider.ReadFile(r.Context(), r.PathValue("id"), b.Path, maxFileBytes)
 	if e != nil {
-		writeProviderError(w, e)
+		writePathError(w, e, b.Path)
 		return
 	}
 	writeJSON(w, 200, fileReadResponse{base64.StdEncoding.EncodeToString(content), info.Size()})
@@ -86,7 +86,7 @@ func (s *Server) fileWrite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if e = s.provider.WriteFile(r.Context(), r.PathValue("id"), b.Path, content); e != nil {
-		writeProviderError(w, e)
+		writePathError(w, e, b.Path)
 		return
 	}
 	writeJSON(w, 200, fileWriteResponse{int64(len(content))})
@@ -121,7 +121,7 @@ func (s *Server) fileStat(w http.ResponseWriter, r *http.Request) {
 	}
 	info, e := s.provider.Stat(r.Context(), r.PathValue("id"), b.Path)
 	if e != nil {
-		writeProviderError(w, e)
+		writePathError(w, e, b.Path)
 		return
 	}
 	writeJSON(w, 200, fileStatResponse{true, info.IsDir(), info.Size(), info.Mode().String(), info.ModTime().UnixMilli()})
@@ -142,7 +142,7 @@ func (s *Server) fileAccess(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if e := s.provider.Access(r.Context(), r.PathValue("id"), b.Path, provider.AccessMode(b.Want)); e != nil {
-		writeProviderError(w, e)
+		writePathError(w, e, b.Path)
 		return
 	}
 	writeJSON(w, 200, struct{}{})
@@ -160,7 +160,7 @@ func (s *Server) fileReaddir(w http.ResponseWriter, r *http.Request) {
 	}
 	entries, e := s.provider.ReadDir(r.Context(), r.PathValue("id"), b.Path)
 	if e != nil {
-		writeProviderError(w, e)
+		writePathError(w, e, b.Path)
 		return
 	}
 	writeJSON(w, 200, fileReaddirResponse{entries})
@@ -193,4 +193,20 @@ func writeProviderError(w http.ResponseWriter, e error) {
 		return
 	}
 	writeAPIError(w, e)
+}
+
+// writePathError maps provider errors for operations addressing a specific
+// workspace-relative path. Unlike writeProviderError it echoes the
+// caller-supplied path so tool errors name the file that is missing or
+// unreadable instead of a bare "path does not exist".
+func writePathError(w http.ResponseWriter, e error, requestedPath string) {
+	if errors.Is(e, fs.ErrNotExist) {
+		writeError(w, http.StatusNotFound, "not_found", "path does not exist: "+requestedPath)
+		return
+	}
+	if errors.Is(e, fs.ErrPermission) {
+		writeError(w, http.StatusForbidden, "access_denied", "permission denied: "+requestedPath)
+		return
+	}
+	writeProviderError(w, e)
 }

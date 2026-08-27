@@ -187,7 +187,12 @@ explicit Git, diff, artifact, or sync operations.
 
 The remote API, seven tool replacements, ordinary-Pi `/scrap` activation,
 workspace selection, Pi-session binding, resume, visible remote state, and
-fail-closed tests are implemented. The temporary `scrap pi` launcher is
+fail-closed tests are implemented. `/scrap` offers to clone the local
+checkout's `origin` (minimal, confirmed, ssh remotes rewritten to https) into
+newly created workspaces and warns when a created workspace ends up empty, so
+the absence of local files is explicit rather than discovered mid-session.
+Missing and unreadable workspace paths surface as 404/403 errors naming the
+path instead of a generic 500. The temporary `scrap pi` launcher is
 obsolete. The remaining architectural follow-up is a Pi resource policy that
 preserves global skills and prompts while auditing or restricting executable
 extensions capable of adding host-backed project tools (issue #4).

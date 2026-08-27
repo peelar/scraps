@@ -91,6 +91,12 @@ func (p *readyPool) create(ctx context.Context, options workspace.CreateOptions)
 	if p == nil {
 		return p.provider.Create(ctx, options)
 	}
+	// Repository network and credential providers are fixed when an OpenShell
+	// sandbox is created. Preheated empty sandboxes intentionally have none, so
+	// repository-backed workspaces must be created fresh.
+	if options.RepoURL != "" {
+		return p.provider.Create(ctx, options)
+	}
 	p.mu.Lock()
 	id := p.readyID
 	p.readyID = ""

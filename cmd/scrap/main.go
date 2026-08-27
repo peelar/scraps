@@ -13,6 +13,8 @@ Usage:
   scrap <command> [arguments]
 
 Commands:
+  new [--repo URL] [project]
+                Create a workspace, optionally cloning a repository
   ls            List workspaces
   start <id>    Start a stopped workspace
   stop <id>     Stop a running workspace
@@ -47,6 +49,8 @@ func run(args []string) int {
 	case "version", "--version", "-v":
 		fmt.Println(version.String("scrap"))
 		return 0
+	case "new":
+		return runNew(rest)
 	case "ls":
 		return runList(rest)
 	case "start", "stop":

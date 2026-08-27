@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net/url"
 	"os/exec"
 	"path"
 	"sort"
@@ -103,6 +104,31 @@ func (o *OpenShell) run(ctx context.Context, stdin []byte, args ...string) ([]by
 	}
 	return out, nil
 }
+func repositoryHost(repoURL string) string {
+	parsed, err := url.Parse(repoURL)
+	if err != nil {
+		return "repository host"
+	}
+	if parsed.Hostname() == "" {
+		return "repository host"
+	}
+	return strings.ToLower(parsed.Hostname())
+}
+
+func repositoryCloneError(repoURL string, cause error) error {
+	reason := "clone failed"
+	message := strings.ToLower(cause.Error())
+	switch {
+	case strings.Contains(message, "connect tunnel failed") || strings.Contains(message, "proxy connect aborted"):
+		reason = "sandbox network policy denied access"
+	case strings.Contains(message, "authentication failed"), strings.Contains(message, "could not read username"), strings.Contains(message, "repository not found"):
+		reason = "repository was not found or authorization was denied"
+	case errors.Is(cause, context.DeadlineExceeded):
+		reason = "clone timed out"
+	}
+	return &RepositoryCloneError{Host: repositoryHost(repoURL), Reason: reason}
+}
+
 func (o *OpenShell) Create(ctx context.Context, opt workspace.CreateOptions) (workspace.Workspace, error) {
 	for attempt := 0; attempt < 8; attempt++ {
 		id, err := workspace.GenerateName()
@@ -119,7 +145,12 @@ func (o *OpenShell) Create(ctx context.Context, opt workspace.CreateOptions) (wo
 		args := []string{"sandbox", "create", "--name", id, "--from", o.image, "--cpu", "2", "--memory", "4Gi", "--label", "dev.scraps.workspace=" + id}
 		// A configured provider contains the brokered credential in OpenShell;
 		// the sandbox receives only rewritten requests, never the PAT itself.
-		if _, providerErr := o.run(ctx, nil, "provider", "get", githubauth.ProfileID); providerErr == nil {
+		_, providerErr := o.run(ctx, nil, "provider", "get", githubauth.ProfileID)
+		providerConfigured := providerErr == nil
+		if strings.TrimSpace(opt.RepoURL) != "" && repositoryHost(opt.RepoURL) == "github.com" && !providerConfigured {
+			return workspace.Workspace{}, &RepositoryAuthorizationRequiredError{Host: "github.com"}
+		}
+		if providerConfigured {
 			args = append(args, "--provider", githubauth.ProfileID)
 		}
 		args = append(args, "--no-auto-providers", "--detach", "--", "sleep", "infinity")
@@ -140,7 +171,7 @@ func (o *OpenShell) Create(ctx context.Context, opt workspace.CreateOptions) (wo
 			cancel()
 			if err != nil {
 				cleanup()
-				return workspace.Workspace{}, fmt.Errorf("clone %s: %w", opt.RepoURL, err)
+				return workspace.Workspace{}, repositoryCloneError(opt.RepoURL, err)
 			}
 		}
 		rec := store.Workspace{ID: id, Project: opt.Project, RepoURL: strings.TrimSpace(opt.RepoURL), Provider: "openshell", State: "running"}
@@ -217,11 +248,16 @@ func (o *OpenShell) Checkout(ctx context.Context, id string, opt workspace.Creat
 		if !strings.HasPrefix(repoURL, "https://") && !strings.HasPrefix(repoURL, "http://") {
 			return workspace.Workspace{}, &InvalidRequestError{Message: "repository URL must use http or https"}
 		}
+		if repositoryHost(repoURL) == "github.com" {
+			if _, err := o.run(ctx, nil, "provider", "get", githubauth.ProfileID); err != nil {
+				return workspace.Workspace{}, &RepositoryAuthorizationRequiredError{Host: "github.com"}
+			}
+		}
 		cloneCtx, cancel := context.WithTimeout(ctx, workspace.CloneTimeout)
 		_, err := o.execRaw(cloneCtx, id, nil, "git", "clone", repoURL, ".")
 		cancel()
 		if err != nil {
-			return workspace.Workspace{}, fmt.Errorf("clone %s: %w", repoURL, err)
+			return workspace.Workspace{}, repositoryCloneError(repoURL, err)
 		}
 	}
 	if err := o.store.AssignWorkspace(ctx, id, opt.Project, repoURL); err != nil {
@@ -442,7 +478,9 @@ func (o *OpenShell) containerPath(ctx context.Context, id, requested string) (st
 
 const openShellStatScript = `import os,json,sys,stat
 p=sys.argv[1]
-s=os.stat(p)
+try: s=os.stat(p)
+except (FileNotFoundError,NotADirectoryError): print(json.dumps({'error':'not_found'}));sys.exit(0)
+except PermissionError: print(json.dumps({'error':'permission'}));sys.exit(0)
 print(json.dumps({'name':os.path.basename(p.rstrip('/')) or 'workspace','size':s.st_size,'mode':s.st_mode,'mtime':s.st_mtime,'dir':stat.S_ISDIR(s.st_mode)}))`
 
 type openShellStat struct {
@@ -451,6 +489,7 @@ type openShellStat struct {
 	Mode  uint32  `json:"mode"`
 	Mtime float64 `json:"mtime"`
 	Dir   bool    `json:"dir"`
+	Error string  `json:"error"`
 }
 type openShellFileInfo struct{ s openShellStat }
 
@@ -472,6 +511,14 @@ func (o *OpenShell) Stat(ctx context.Context, id, p string) (fs.FileInfo, error)
 	var s openShellStat
 	if e = json.Unmarshal(out, &s); e != nil {
 		return nil, e
+	}
+	// The stat script reports missing and unreadable paths as structured
+	// errors so the HTTP layer can answer 404/403 instead of a generic 500.
+	switch s.Error {
+	case "not_found":
+		return nil, fmt.Errorf("stat %s: %w", p, fs.ErrNotExist)
+	case "permission":
+		return nil, fmt.Errorf("stat %s: %w", p, fs.ErrPermission)
 	}
 	return openShellFileInfo{s}, nil
 }
@@ -510,7 +557,7 @@ func (o *OpenShell) Mkdir(ctx context.Context, id, p string) error {
 	return e
 }
 func (o *OpenShell) Access(ctx context.Context, id, p string, m AccessMode) error {
-	p, e := o.containerPath(ctx, id, p)
+	cp, e := o.containerPath(ctx, id, p)
 	if e != nil {
 		return e
 	}
@@ -518,16 +565,24 @@ func (o *OpenShell) Access(ctx context.Context, id, p string, m AccessMode) erro
 	if m == AccessWrite {
 		flag = "-w"
 	}
-	_, e = o.execOutput(ctx, id, nil, "test", flag, p)
-	return e
+	if _, e = o.execOutput(ctx, id, nil, "test", flag, cp); e != nil {
+		// `test` exits 1 for both missing and unreadable paths; classify so
+		// callers see 404 versus 403 instead of a generic 500.
+		return classifyPathError(ctx, o, id, p, cp, e)
+	}
+	return nil
 }
 func (o *OpenShell) ReadDir(ctx context.Context, id, p string) ([]string, error) {
-	p, e := o.containerPath(ctx, id, p)
+	cp, e := o.containerPath(ctx, id, p)
 	if e != nil {
 		return nil, e
 	}
-	out, e := o.execOutput(ctx, id, nil, "find", p, "-mindepth", "1", "-maxdepth", "1", "-printf", "%f\\n")
+	out, e := o.execOutput(ctx, id, nil, "find", cp, "-mindepth", "1", "-maxdepth", "1", "-printf", "%f\\n")
 	if e != nil {
+		// `find` fails identically for missing and unreadable roots; classify.
+		if _, se := o.Stat(ctx, id, p); errors.Is(se, fs.ErrNotExist) {
+			return nil, fmt.Errorf("readdir %s: %w", cp, fs.ErrNotExist)
+		}
 		return nil, e
 	}
 	text := strings.TrimSpace(string(out))
@@ -610,6 +665,23 @@ func openShellBoolArg(v bool) string {
 		return "1"
 	}
 	return "0"
+}
+
+// classifyPathError distinguishes missing paths from unreadable ones after a
+// shell primitive (test, find) failed without a reason. requested is the
+// workspace-relative path (accepted by Stat); display is the agent-visible
+// container path used in messages. The extra stat keeps the happy path at one
+// exec and only runs on failure.
+func classifyPathError(ctx context.Context, o *OpenShell, id, requested, display string, fallback error) error {
+	if _, se := o.Stat(ctx, id, requested); se != nil {
+		if errors.Is(se, fs.ErrNotExist) {
+			return fmt.Errorf("access %s: %w", display, fs.ErrNotExist)
+		}
+		if errors.Is(se, fs.ErrPermission) {
+			return fmt.Errorf("access %s: %w", display, fs.ErrPermission)
+		}
+	}
+	return fallback
 }
 
 var _ Provider = (*OpenShell)(nil)

@@ -15,9 +15,16 @@ type poolProvider struct {
 	mu       sync.Mutex
 	ready    []workspace.Workspace
 	preheats int
+	creates  int
 	deleted  []string
 }
 
+func (f *poolProvider) Create(_ context.Context, opt workspace.CreateOptions) (workspace.Workspace, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.creates++
+	return workspace.Workspace{ID: "fresh", Project: opt.Project, RepoURL: opt.RepoURL, State: "running"}, nil
+}
 func (f *poolProvider) Preheat(context.Context) (workspace.Workspace, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -81,6 +88,23 @@ func TestReadyPoolPreheatsChecksOutAndReplenishes(t *testing.T) {
 		t.Fatalf("created = %+v", created)
 	}
 	waitFor(t, func() bool { f.mu.Lock(); defer f.mu.Unlock(); return f.preheats == 2 && len(f.ready) == 1 })
+}
+
+func TestReadyPoolCreatesRepositoryWorkspaceFresh(t *testing.T) {
+	f := &poolProvider{}
+	p := newReadyPool(f)
+	defer p.close()
+	waitFor(t, func() bool { f.mu.Lock(); defer f.mu.Unlock(); return f.preheats == 1 })
+
+	created, err := p.create(context.Background(), workspace.CreateOptions{Project: "demo", RepoURL: "https://github.com/owner/repo.git"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if created.ID != "fresh" || f.creates != 1 || len(f.ready) != 1 {
+		t.Fatalf("created=%+v creates=%d ready=%+v", created, f.creates, f.ready)
+	}
 }
 
 func TestReadyPoolReclaimsExcessPersistedSpares(t *testing.T) {

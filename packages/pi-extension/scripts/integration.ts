@@ -58,7 +58,7 @@ await step("daemon reachable", async () => {
 const created = existingId === undefined;
 if (created) {
 	await step("create workspace", async () => {
-		const workspace = await session.create("scraps/integration");
+		const workspace = await session.create({ project: "scraps/integration" });
 		return workspace.id;
 	});
 } else {

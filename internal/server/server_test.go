@@ -211,9 +211,24 @@ func TestWorkspaceLifecycle(t *testing.T) {
 func TestCreateRejectsBadRepoURL(t *testing.T) {
 	ts := newTestServer(t)
 
-	response := ts.do(t, http.MethodPost, "/v1/workspaces", workspace.CreateOptions{RepoURL: "ssh://git@example.com/x.git"}, "")
+	response := ts.do(t, http.MethodPost, "/v1/workspaces", workspace.CreateOptions{RepoURL: "file:///tmp/x.git"}, "")
 	if response.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400: %s", response.Code, response.Body.String())
+	}
+}
+
+func TestWorkspaceCreationErrorsAreActionable(t *testing.T) {
+	for err, want := range map[error]struct {
+		status int
+		code   string
+	}{
+		&provider.RepositoryAuthorizationRequiredError{Host: "github.com"}:                                                 {http.StatusConflict, "repository_auth_required"},
+		&provider.RepositoryCloneError{Host: "github.com", Reason: "repository was not found or authorization was denied"}: {http.StatusBadGateway, "repository_clone_failed"},
+	} {
+		mapped, ok := workspaceCreationError(err).(*apiError)
+		if !ok || mapped.status != want.status || mapped.code != want.code {
+			t.Errorf("workspaceCreationError(%T) = %#v; want status %d code %q", err, mapped, want.status, want.code)
+		}
 	}
 }
 
@@ -402,6 +417,15 @@ func TestFileRoundTrip(t *testing.T) {
 	response := ts.do(t, http.MethodPost, "/v1/workspaces/"+created.ID+"/files/stat", pathRequest{Path: target}, "")
 	if response.Code != http.StatusNotFound {
 		t.Fatalf("stat status = %d, want 404", response.Code)
+	}
+
+	// read before creation -> 404 naming the requested path
+	response = ts.do(t, http.MethodPost, "/v1/workspaces/"+created.ID+"/files/read", pathRequest{Path: target}, "")
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("read status = %d, want 404", response.Code)
+	}
+	if body := response.Body.String(); !strings.Contains(body, target) {
+		t.Fatalf("read 404 body %q does not name the missing path %q", body, target)
 	}
 
 	// write

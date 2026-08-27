@@ -4,13 +4,18 @@
  * `/scrap` and `/scrap-select` can activate remote mode from ordinary Pi.
  */
 
+import { execFile as execFileCallback } from "node:child_process";
 import path from "node:path";
+import { promisify } from "node:util";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 import { DEFAULT_DAEMON_URL } from "./client.ts";
 import { clientEnvironment } from "./config.ts";
+import { ScrapdApiError } from "./errors.ts";
 import type { RemoteConfig, SessionBinding } from "./identity.ts";
 import { describeError, describeSession, portsHint, type WorkspaceSession } from "./workspace.ts";
+
+const execFile = promisify(execFileCallback);
 
 /** Minimal UI surface the commands need (satisfied by ExtensionContext.ui). */
 type Ui = {
@@ -25,6 +30,7 @@ export function registerScrapCommands(
 	activateRemote: (config: RemoteConfig) => void,
 	persistBinding: (binding: SessionBinding) => void,
 	notifyEnvironment: (ui: Ui) => void,
+	detectRemote: (cwd: string) => Promise<string | undefined> = detectGitRemoteUrl,
 ): void {
 	const defaultRemoteConfig = (): RemoteConfig => {
 		const env = clientEnvironment();
@@ -104,23 +110,33 @@ export function registerScrapCommands(
 
 			try {
 				const configuredWorkspace = session.workspaceId;
-				const workspace =
-					configuredWorkspace === undefined
-						? await session.create(
-								args.trim() || session.project || path.basename(ctx.cwd) || "workspace",
-							)
-						: await session.connect(configuredWorkspace);
+				const creating = configuredWorkspace === undefined;
+				// Workspaces never receive local files directly (ADR 0001); a git
+				// remote is the transport, so offer the local checkout's origin.
+				const repoUrl = creating ? await offerRepositoryClone(ctx, detectRemote) : undefined;
+				const workspace = creating
+					? await session.create({
+							project: args.trim() || session.project || path.basename(ctx.cwd) || "workspace",
+							...(repoUrl === undefined ? {} : { repoUrl }),
+						})
+					: await session.connect(configuredWorkspace);
 				wirePortsNotifier(ctx.ui);
 				persistRemote();
 				refreshStatus(ctx.ui);
 				ctx.ui.notify(`Connected to Scraps workspace ${workspace.id}.`, "info");
+				if (creating) {
+					await notifyEmptyWorkspace(ctx.ui, session);
+				}
 			} catch (error) {
 				refreshStatus(ctx.ui);
 				const local = session.daemonUrl === undefined || session.daemonUrl === DEFAULT_DAEMON_URL;
-				const hint = local
-					? "Start the local worker VM with `make up`, or attach a remote worker with `scrap attach`, then run /scrap again."
-					: `Check the worker with \`scrap status\` (${session.daemonUrl}); if it moved, re-attach with \`scrap attach\`.`;
-				ctx.ui.notify(`Cannot start Scraps workspace: ${describeError(error)}. ${hint}`, "error");
+				const hint =
+					error instanceof ScrapdApiError
+						? ""
+						: local
+							? " Start the local worker VM with `make up`, or attach a remote worker with `scrap attach`, then run /scrap again."
+							: ` Check the worker with \`scrap status\` (${session.daemonUrl}); if it moved, re-attach with \`scrap attach\`.`;
+				ctx.ui.notify(`Cannot start Scraps workspace: ${describeError(error)}.${hint}`, "error");
 			}
 		},
 	});
@@ -182,11 +198,16 @@ export function registerScrapCommands(
 			}
 			const project = args.trim();
 			try {
-				const workspace = await session.create(project.length > 0 ? project : undefined);
+				const repoUrl = await offerRepositoryClone(ctx, detectRemote);
+				const workspace = await session.create({
+					...(project.length > 0 ? { project } : {}),
+					...(repoUrl === undefined ? {} : { repoUrl }),
+				});
 				wirePortsNotifier(ctx.ui);
 				persistRemote();
 				refreshStatus(ctx.ui);
 				ctx.ui.notify(`Created Scraps workspace ${workspace.id}.`, "info");
+				await notifyEmptyWorkspace(ctx.ui, session);
 			} catch (error) {
 				refreshStatus(ctx.ui);
 				ctx.ui.notify(`Cannot create workspace: ${describeError(error)}`, "error");
@@ -222,4 +243,64 @@ export function registerScrapCommands(
 			}
 		},
 	});
+}
+
+/**
+ * Resolve the local checkout's origin URL for a new workspace.
+ *
+ * This is the only local repository inspection Scraps performs (ADR 0001:
+ * minimal and visible), and the URL is always shown to the user for
+ * confirmation before anything is cloned.
+ */
+async function detectGitRemoteUrl(cwd: string): Promise<string | undefined> {
+	try {
+		const { stdout } = await execFile("git", ["-C", cwd, "remote", "get-url", "origin"], {
+			timeout: 5000,
+		});
+		const remote = stdout.trim();
+		return /^(https?|ssh):\/\//.test(remote) || /^[^@/\s]+@[^:/\s]+:.+$/.test(remote) ? remote : undefined;
+	} catch {
+		// Not a git checkout, no origin, or git is unavailable: create empty.
+		return undefined;
+	}
+}
+
+/** Ask whether to clone the detected origin into the new workspace. */
+async function offerRepositoryClone(
+	ctx: { cwd: string; ui: { confirm: (title: string, body: string) => Promise<boolean> } },
+	detectRemote: (cwd: string) => Promise<string | undefined>,
+): Promise<string | undefined> {
+	const remote = await detectRemote(ctx.cwd);
+	if (remote === undefined) {
+		return undefined;
+	}
+	const confirmed = await ctx.ui.confirm(
+		"Clone repository into workspace?",
+		`Clone ${remote} (its default branch) into the new Scraps workspace? Unpushed local changes are not included.`,
+	);
+	return confirmed ? remote : undefined;
+}
+
+/**
+ * Tell the user when a freshly created workspace has no project files, so an
+ * empty /workspace is never mistaken for a broken attachment. `.scrap` is
+ * Scraps' own internal directory and does not count as project content.
+ */
+async function notifyEmptyWorkspace(ui: Ui, session: WorkspaceSession): Promise<void> {
+	const workspace = session.connectedWorkspace;
+	if (workspace === undefined) {
+		return;
+	}
+	try {
+		const entries = await session.requireClient().readdir(workspace.id, ".");
+		if (entries.every((entry) => entry === ".scrap")) {
+			ui.notify(
+				`Workspace ${workspace.id} is empty — local files are not copied into Scraps workspaces. ` +
+					"Push the project to a git remote and run /scrap again to clone it, or create files from the agent side.",
+				"warning",
+			);
+		}
+	} catch {
+		// Advisory only: never surface directory listing failures here.
+	}
 }

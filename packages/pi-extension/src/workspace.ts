@@ -226,10 +226,11 @@ export class WorkspaceSession {
 	}
 
 	/** Create a workspace through scrapd and connect to it. */
-	async create(project?: string): Promise<WorkspaceRecord> {
+	async create(options: { project?: string; repoUrl?: string } = {}): Promise<WorkspaceRecord> {
 		const client = this.requireClient();
 		const workspace = await client.createWorkspace({
-			...(project === undefined ? {} : { project }),
+			...(options.project === undefined ? {} : { project: options.project }),
+			...(options.repoUrl === undefined ? {} : { repoUrl: options.repoUrl }),
 		});
 		assertCompatibleWorkspace(workspace);
 		const provider = await providerName(client);

@@ -24,6 +24,7 @@ function remoteConfig(overrides: Partial<RemoteConfig> = {}): RemoteConfig {
 
 type FakeMethods = {
 	getWorkspace?: (id: string) => Promise<WorkspaceRecord>;
+	createWorkspace?: (input: unknown) => Promise<WorkspaceRecord>;
 	info?: () => Promise<{ name: string; version: string; provider?: string }>;
 	ports?: (id: string) => Promise<number[]>;
 };
@@ -89,6 +90,27 @@ describe("WorkspaceSession connection", () => {
 		assert.equal(statusText(session), "scrap:docker:quiet-river:running");
 		assert.ok(describeSession(session).includes("Provider: docker"));
 		assert.ok(describeSession(session).includes("Remote root: /workspace"));
+	});
+
+	it("creates workspaces with an optional repository to clone", async () => {
+		const inputs: unknown[] = [];
+		const client = fakeClient({
+			createWorkspace: async (input: unknown) => {
+				inputs.push(input);
+				return record;
+			},
+		});
+		const session = new WorkspaceSession(() => client);
+		session.configure(remoteConfig());
+
+		await session.create({ project: "demo", repoUrl: "https://github.com/peelar/scraps.git" });
+		await session.create();
+
+		assert.deepEqual(inputs, [
+			{ project: "demo", repoUrl: "https://github.com/peelar/scraps.git" },
+			{},
+		]);
+		assert.equal(session.connection.status, "connected");
 	});
 
 	it("fails explicitly for the transitional host-path contract", async () => {

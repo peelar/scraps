@@ -1,6 +1,7 @@
 package provider
 
 import (
+	"fmt"
 	"path"
 	"strings"
 
@@ -12,6 +13,26 @@ import (
 type InvalidRequestError struct{ Message string }
 
 func (e *InvalidRequestError) Error() string { return e.Message }
+
+// RepositoryAuthorizationRequiredError reports that a sandbox cannot receive
+// the network and credential capability required to access a repository.
+type RepositoryAuthorizationRequiredError struct{ Host string }
+
+func (e *RepositoryAuthorizationRequiredError) Error() string {
+	return fmt.Sprintf("repository access to %s is not configured; run `scrap auth github`", e.Host)
+}
+
+// RepositoryCloneError is a safe, caller-visible clone failure. Provider
+// command output remains server-side because it may contain credential or
+// transport details.
+type RepositoryCloneError struct {
+	Host   string
+	Reason string
+}
+
+func (e *RepositoryCloneError) Error() string {
+	return fmt.Sprintf("could not clone repository from %s: %s", e.Host, e.Reason)
+}
 
 func publicWorkspace(w store.Workspace) workspace.Workspace {
 	return workspace.Workspace{
