@@ -34,7 +34,20 @@ func runStatus(args []string) int {
 	policy := info.Policy
 	fmt.Printf("  policy env=%s · network=%s · resources=%s · credentials=%s · cleanup=%s\n",
 		policy.Environment, policy.Network, policy.Resources, policy.Credentials, policy.ProcessCleanup)
+	runnerReady := info.Features.DurableRuns && info.Features.ModelAuth
+	switch {
+	case !info.Features.DurableRuns:
+		fmt.Println("  ERROR durable Pi runner unavailable — upgrade or configure this worker")
+	case !info.Features.ModelAuth:
+		fmt.Println("  ERROR durable Pi runner has no model authorization")
+		fmt.Println("        on the worker, run: sudo scraps-worker model-auth anthropic")
+	default:
+		fmt.Println("  durable Pi runner ready · model authorization configured")
+	}
 	printWorkspaceSummary(api)
+	if !runnerReady {
+		return 1
+	}
 	return 0
 }
 

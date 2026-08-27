@@ -19,6 +19,39 @@ func openTestStore(t *testing.T) *Store {
 	return store
 }
 
+func TestMigratesRunsWithoutSessionSnapshots(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "old-runs.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`
+		CREATE TABLE workspaces (id TEXT PRIMARY KEY, project TEXT NOT NULL DEFAULT '', repo_url TEXT NOT NULL DEFAULT '', state TEXT NOT NULL DEFAULT 'running', provider TEXT NOT NULL DEFAULT 'directory', created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+		CREATE TABLE runs (id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL REFERENCES workspaces(id), session_key TEXT NOT NULL, prompt TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'queued', error TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL, started_at INTEGER, finished_at INTEGER, updated_at INTEGER NOT NULL);
+		INSERT INTO workspaces (id, state, created_at, updated_at) VALUES ('ws', 'running', 1, 1);
+		INSERT INTO runs (id, workspace_id, session_key, prompt, state, created_at, updated_at) VALUES ('run', 'ws', 'session', 'prompt', 'failed', 1, 1);
+	`)
+	if err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	st, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	run, err := st.GetRun(context.Background(), "run")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(run.SessionSnapshot) != "[]" {
+		t.Fatalf("migrated session snapshot = %q, want []", run.SessionSnapshot)
+	}
+}
+
 func TestWorkspaceRoundTrip(t *testing.T) {
 	store := openTestStore(t)
 	ctx := context.Background()

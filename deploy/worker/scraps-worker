@@ -3,7 +3,7 @@ set -euo pipefail
 
 ENV_FILE=/etc/scraps/scrapd.env
 BACKUP_ROOT=/var/backups/scraps
-usage() { echo "usage: scraps-worker <diagnostics|healthcheck|enable-backups [DIR]|backup [DIR]|restore ARCHIVE|upgrade BUNDLE|rollback|tailscale-enroll|tailscale-serve|rotate-token>"; }
+usage() { echo "usage: scraps-worker <diagnostics|healthcheck|profile-install|model-auth PROVIDER [--stdin]|enable-backups [DIR]|backup [DIR]|restore ARCHIVE|upgrade BUNDLE|rollback|tailscale-enroll|tailscale-serve|rotate-token>"; }
 need_root() { [[ $EUID -eq 0 ]] || { echo "this command requires root" >&2; exit 1; }; }
 user_systemctl() {
   local uid
@@ -16,6 +16,15 @@ start_stack() {
   timeout 30 bash -c 'until ss -lnt | grep -q "127.0.0.1:17670"; do sleep 1; done'
   systemctl start scrapd.service
 }
+scrapd_info() {
+  local token
+  token=$(sed -n 's/^SCRAPD_TOKEN=//p' "$ENV_FILE" | tail -1)
+  if [[ -n $token ]]; then
+    curl -fsS --max-time 5 -H "Authorization: Bearer $token" http://127.0.0.1:8484/v1/info
+  else
+    curl -fsS --max-time 5 http://127.0.0.1:8484/v1/info
+  fi
+}
 
 case "${1:-}" in
   diagnostics)
@@ -24,6 +33,7 @@ case "${1:-}" in
     docker info --format 'Docker {{.ServerVersion}}: {{.Containers}} containers, {{.Images}} images' || true
     runuser -u scraps -- env HOME=/home/scraps PATH=/opt/scraps/current/bin:/home/scraps/.local/bin:/usr/local/bin:/usr/bin:/bin openshell status || true
     curl -fsS http://127.0.0.1:8484/healthz && echo
+    scrapd_info && echo
     sqlite3 /var/lib/scraps/scrapd/scrapd.db 'PRAGMA quick_check;' || true
     df -h / /var/lib/scraps /var/lib/docker
     du -sh /var/lib/scraps /var/lib/docker 2>/dev/null || true
@@ -41,6 +51,9 @@ case "${1:-}" in
     systemctl is-active --quiet scrapd.service || issues+=("scrapd is not active")
     user_systemctl is-active --quiet openshell-gateway.service || issues+=("OpenShell gateway is not active")
     curl -fsS --max-time 5 http://127.0.0.1:8484/healthz >/dev/null || issues+=("scrapd health check failed")
+    runner_info=$(scrapd_info 2>/dev/null || true)
+    [[ $runner_info == *'"durableRuns":true'* ]] || issues+=("durable Pi runner is unavailable")
+    [[ $runner_info == *'"modelAuth":true'* ]] || issues+=("durable Pi runner has no model authorization")
     disk_used=$(df --output=pcent /var/lib/docker | tail -1 | tr -dc '0-9')
     [[ $disk_used =~ ^[0-9]+$ ]] || issues+=("Docker disk utilization could not be read")
     if [[ $disk_used =~ ^[0-9]+$ && $disk_used -ge $disk_limit ]]; then issues+=("Docker disk utilization is ${disk_used}%"); fi
@@ -64,6 +77,101 @@ case "${1:-}" in
         "$SCRAPS_ALERT_WEBHOOK" "$escaped" | curl --fail --silent --show-error --config - >/dev/null || true
     fi
     exit 1
+    ;;
+  profile-install)
+    need_root
+    profile_root=/var/lib/scraps/scrapd/pi-profile
+    archive=$(mktemp /run/scraps-pi-profile.XXXXXX.tar.gz)
+    stage=$(mktemp -d /var/lib/scraps/scrapd/pi-profile-stage.XXXXXX)
+    trap 'rm -rf -- "$archive" "$stage"' EXIT
+    chmod 0600 "$archive"
+    cat >"$archive"
+    archive_size=$(stat -c %s "$archive")
+    (( archive_size <= 16777216 )) || { echo "Pi profile archive exceeds 16 MiB" >&2; exit 1; }
+    tar -xzf "$archive" --no-same-owner --no-same-permissions -C "$stage"
+    if find "$stage" -type l -o \! -type d -a \! -type f | grep -q .; then
+      echo "Pi profile contains unsupported filesystem entries" >&2
+      exit 1
+    fi
+    while IFS= read -r relative; do
+      case "$relative" in
+        scraps-profile-manifest.json|auth.json|models.json|AGENTS.md|skills/*|prompts/*) ;;
+        *) echo "Pi profile contains a disallowed path: $relative" >&2; exit 1 ;;
+      esac
+    done < <(find "$stage" -type f -printf '%P\n')
+    python3 - "$stage" <<'PY'
+import hashlib, json, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+manifest = json.loads((root / "scraps-profile-manifest.json").read_text())
+if manifest.get("version") != 1:
+    raise SystemExit("unsupported Pi profile manifest")
+actual = {}
+for path in root.rglob("*"):
+    if path.is_file() and path.name != "scraps-profile-manifest.json":
+        relative = path.relative_to(root).as_posix()
+        actual[relative] = hashlib.sha256(path.read_bytes()).hexdigest()
+if actual != manifest.get("files"):
+    raise SystemExit("Pi profile manifest does not match archive contents")
+print(manifest.get("generation", ""))
+PY
+    # OAuth tokens may refresh on the durable worker. Preserve its mutable auth
+    # after initial cloning rather than overwriting it with an older laptop copy.
+    if [[ -s $profile_root/auth.json ]]; then
+      install -m 0600 "$profile_root/auth.json" "$stage/auth.json"
+    fi
+    install -o root -g scraps -m 0640 "$stage/scraps-profile-manifest.json" /var/lib/scraps/scrapd/pi-profile-manifest.json
+    rm -f "$stage/scraps-profile-manifest.json"
+    chown -R scraps:scraps "$stage"
+    find "$stage" -type d -exec chmod 0700 {} +
+    find "$stage" -type f -exec chmod 0600 {} +
+    previous=${profile_root}.previous
+    rm -rf "$previous"
+    if [[ -e $profile_root ]]; then mv "$profile_root" "$previous"; fi
+    mv "$stage" "$profile_root"
+    stage=
+    systemctl restart scrapd.service
+    timeout 30 bash -c 'until curl -fsS http://127.0.0.1:8484/healthz >/dev/null; do sleep 1; done'
+    rm -rf "$previous" "$archive"
+    trap - EXIT
+    echo "Cloned Pi runner profile installed."
+    ;;
+  model-auth)
+    need_root
+    provider=${2:-}
+    case "$provider" in
+      anthropic) credential_name=ANTHROPIC_API_KEY ;;
+      openai) credential_name=OPENAI_API_KEY ;;
+      google) credential_name=GEMINI_API_KEY ;;
+      openrouter) credential_name=OPENROUTER_API_KEY ;;
+      *) echo "usage: scraps-worker model-auth <anthropic|openai|google|openrouter> [--stdin]" >&2; exit 2 ;;
+    esac
+    if [[ ${3:-} == --stdin ]]; then
+      IFS= read -r credential
+    elif [[ -n ${3:-} ]]; then
+      echo "model credentials are read from the terminal or stdin, never command arguments" >&2
+      exit 2
+    elif [[ -t 0 ]]; then
+      IFS= read -r -s -p "$provider API key: " credential
+      echo
+    else
+      echo "stdin is not a terminal; pass --stdin explicitly for noninteractive enrollment" >&2
+      exit 2
+    fi
+    [[ -n $credential && $credential =~ ^[A-Za-z0-9._:/+=-]+$ ]] || {
+      unset credential
+      echo "credential is empty or contains unsupported characters" >&2
+      exit 1
+    }
+    model_env=/etc/scraps/model.env
+    new_model_env=$(mktemp /etc/scraps/model.env.XXXXXX)
+    if [[ -r $model_env ]]; then grep -v "^${credential_name}=" "$model_env" >"$new_model_env" || true; fi
+    printf '%s=%s\n' "$credential_name" "$credential" >>"$new_model_env"
+    unset credential
+    chown root:scraps "$new_model_env"; chmod 0640 "$new_model_env"; mv "$new_model_env" "$model_env"
+    systemctl restart scrapd.service
+    timeout 30 bash -c 'until curl -fsS http://127.0.0.1:8484/healthz >/dev/null; do sleep 1; done'
+    echo "$provider model credential enrolled in the trusted worker control plane"
+    echo "The credential was not copied into any OpenShell workspace."
     ;;
   enable-backups)
     need_root
@@ -118,9 +226,15 @@ case "${1:-}" in
     previous_repository=$(sed -n 's/^SCRAPS_WORKSPACE_IMAGE_REPOSITORY=//p' "$previous/manifest.env")
     [[ -n $previous_version && -n $previous_repository ]] || { echo "previous release metadata is invalid" >&2; exit 1; }
     rollback_env=$(mktemp /etc/scraps/scrapd.env.XXXXXX)
+    previous_has_runner=false
+    [[ -x $previous/runner/pi-runner ]] && previous_has_runner=true
     while IFS= read -r line; do
       if [[ $line == SCRAPD_OPENSHELL_IMAGE=* ]]; then
         printf 'SCRAPD_OPENSHELL_IMAGE=%s:%s\n' "$previous_repository" "$previous_version"
+      elif [[ $line == SCRAPD_PI_COMMAND=* && $previous_has_runner == false ]]; then
+        # Releases predating durable Pi cannot advertise a runner they do not
+        # contain. Scraps mode will fail closed after this rollback.
+        continue
       else
         printf '%s\n' "$line"
       fi

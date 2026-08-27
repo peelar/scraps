@@ -59,6 +59,10 @@ type Provider interface {
 	ReadFile(context.Context, string, string, int64) ([]byte, fs.FileInfo, error)
 	WriteFile(context.Context, string, string, []byte) error
 	Mkdir(context.Context, string, string) error
+	// RemoveAll deletes the workspace-relative file or directory tree at p.
+	// It backs explicit, user-initiated resets such as archive replace
+	// imports; nothing calls it implicitly.
+	RemoveAll(context.Context, string, string) error
 	Stat(context.Context, string, string) (fs.FileInfo, error)
 	Access(context.Context, string, string, AccessMode) error
 	ReadDir(context.Context, string, string) ([]string, error)

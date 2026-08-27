@@ -3,6 +3,7 @@
 .idea/
 .vscode/
 bin/
+.cache/
 coverage/
 dist/
 node_modules/

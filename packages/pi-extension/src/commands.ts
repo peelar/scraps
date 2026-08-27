@@ -4,8 +4,10 @@
  * `/scrap` and `/scrap-select` can activate remote mode from ordinary Pi.
  */
 
-import { execFile as execFileCallback } from "node:child_process";
+import { execFile as execFileCallback, spawn } from "node:child_process";
+import { readdir } from "node:fs/promises";
 import path from "node:path";
+import { Readable } from "node:stream";
 import { promisify } from "node:util";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
@@ -31,6 +33,8 @@ export function registerScrapCommands(
 	persistBinding: (binding: SessionBinding) => void,
 	notifyEnvironment: (ui: Ui) => void,
 	detectRemote: (cwd: string) => Promise<string | undefined> = detectGitRemoteUrl,
+	inspectLocalDirectory: (cwd: string) => Promise<number> = countLocalEntries,
+	buildLocalArchive: (cwd: string) => Promise<ReadableStream<Uint8Array>> = tarLocalDirectory,
 ): void {
 	const defaultRemoteConfig = (): RemoteConfig => {
 		const env = clientEnvironment();
@@ -114,6 +118,11 @@ export function registerScrapCommands(
 				// Workspaces never receive local files directly (ADR 0001); a git
 				// remote is the transport, so offer the local checkout's origin.
 				const repoUrl = creating ? await offerRepositoryClone(ctx, detectRemote) : undefined;
+				// Without a repository, offer a one-shot directory copy (ADR 0014)
+				// so scratch projects can enter the workspace without a forge.
+				const pushDirectory = creating && repoUrl === undefined
+					? await offerDirectoryCopy(ctx, inspectLocalDirectory)
+					: false;
 				const workspace = creating
 					? await session.create({
 							project: args.trim() || session.project || path.basename(ctx.cwd) || "workspace",
@@ -125,6 +134,9 @@ export function registerScrapCommands(
 				refreshStatus(ctx.ui);
 				ctx.ui.notify(`Connected to Scraps workspace ${workspace.id}.`, "info");
 				if (creating) {
+					if (pushDirectory) {
+						await pushLocalDirectory(ctx, session, workspace.id, buildLocalArchive);
+					}
 					await notifyEmptyWorkspace(ctx.ui, session);
 				}
 			} catch (error) {
@@ -199,6 +211,9 @@ export function registerScrapCommands(
 			const project = args.trim();
 			try {
 				const repoUrl = await offerRepositoryClone(ctx, detectRemote);
+				const pushDirectory = repoUrl === undefined
+					? await offerDirectoryCopy(ctx, inspectLocalDirectory)
+					: false;
 				const workspace = await session.create({
 					...(project.length > 0 ? { project } : {}),
 					...(repoUrl === undefined ? {} : { repoUrl }),
@@ -207,6 +222,9 @@ export function registerScrapCommands(
 				persistRemote();
 				refreshStatus(ctx.ui);
 				ctx.ui.notify(`Created Scraps workspace ${workspace.id}.`, "info");
+				if (pushDirectory) {
+					await pushLocalDirectory(ctx, session, workspace.id, buildLocalArchive);
+				}
 				await notifyEmptyWorkspace(ctx.ui, session);
 			} catch (error) {
 				refreshStatus(ctx.ui);
@@ -282,6 +300,82 @@ async function offerRepositoryClone(
 }
 
 /**
+ * Offer a one-shot directory copy into the new workspace (ADR 0014). Returns
+ * whether the user confirmed; the copy runs only after the workspace exists.
+ * Returns false for an empty directory: there is nothing to copy.
+ */
+async function offerDirectoryCopy(
+	ctx: { cwd: string; ui: { confirm: (title: string, body: string) => Promise<boolean> } },
+	inspect: (cwd: string) => Promise<number>,
+): Promise<boolean> {
+	const entries = await inspect(ctx.cwd);
+	if (entries === 0) {
+		return false;
+	}
+	return ctx.ui.confirm(
+		"Copy this directory into the new workspace?",
+		`Copy ${entries} entr${entries === 1 ? "y" : "ies"} from ${ctx.cwd}? The copy is literal: .git and uncommitted changes are included.`,
+	);
+}
+
+/** Push the local directory into the workspace, reporting the outcome. */
+async function pushLocalDirectory(
+	ctx: { cwd: string; ui: { notify: (message: string, level: "info" | "warning" | "error") => void } },
+	session: WorkspaceSession,
+	workspaceId: string,
+	buildArchive: (cwd: string) => Promise<ReadableStream<Uint8Array>>,
+): Promise<void> {
+	try {
+		const archive = await buildArchive(ctx.cwd);
+		const result = await session.requireClient().pushArchive(workspaceId, archive);
+		ctx.ui.notify(
+			`Copied ${result.files} file${result.files === 1 ? "" : "s"} (${result.bytes} bytes) into ${workspaceId}.`,
+			"info",
+		);
+	} catch (error) {
+		ctx.ui.notify(
+			`Workspace ${workspaceId} was created, but copying ${ctx.cwd} failed: ${describeError(error)}. ` +
+				`Retry from the terminal with: scrap push ${workspaceId} ${ctx.cwd}`,
+			"warning",
+		);
+	}
+}
+
+/** Count entries in a local directory; 0 when it is missing or unreadable. */
+async function countLocalEntries(cwd: string): Promise<number> {
+	try {
+		return (await readdir(cwd)).length;
+	} catch {
+		return 0;
+	}
+}
+
+/**
+ * Stream the local directory as a tar archive, excluding Scraps' internal
+ * directory. Uses the system tar so the extension carries no archive code.
+ */
+async function tarLocalDirectory(cwd: string): Promise<ReadableStream<Uint8Array>> {
+	const child = spawn("tar", ["-cf", "-", "--exclude=.scrap", "-C", cwd, "."], {
+		stdio: ["ignore", "pipe", "pipe"],
+	});
+	const stderr: string[] = [];
+	child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk.toString()));
+	const finished = new Promise<void>((resolve, reject) => {
+		child.on("close", (code) => {
+			if (code === 0) {
+				resolve();
+			} else {
+				reject(new Error(stderr.join("").trim() || `tar exited with code ${code}`));
+			}
+		});
+		child.on("error", reject);
+	});
+	// Surface tar failures even if nobody awaits the stream to completion.
+	finished.catch(() => {});
+	return Readable.toWeb(child.stdout) as ReadableStream<Uint8Array>;
+}
+
+/**
  * Tell the user when a freshly created workspace has no project files, so an
  * empty /workspace is never mistaken for a broken attachment. `.scrap` is
  * Scraps' own internal directory and does not count as project content.
@@ -295,8 +389,8 @@ async function notifyEmptyWorkspace(ui: Ui, session: WorkspaceSession): Promise<
 		const entries = await session.requireClient().readdir(workspace.id, ".");
 		if (entries.every((entry) => entry === ".scrap")) {
 			ui.notify(
-				`Workspace ${workspace.id} is empty — local files are not copied into Scraps workspaces. ` +
-					"Push the project to a git remote and run /scrap again to clone it, or create files from the agent side.",
+				`Workspace ${workspace.id} is empty — local files are not copied automatically. ` +
+					"Run /scrap again from a git checkout to clone it, run `scrap push <workspace> <dir>` to copy a local directory, or create files from the agent side.",
 				"warning",
 			);
 		}

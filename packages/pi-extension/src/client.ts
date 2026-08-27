@@ -86,6 +86,24 @@ export type GrepResult = {
 	readonly limitReached: boolean;
 };
 
+export type RunRecord = {
+	readonly id: string;
+	readonly workspaceId: string;
+	readonly sessionKey: string;
+	readonly state: "queued" | "running" | "succeeded" | "failed" | "cancelled";
+	readonly error?: string;
+	readonly createdAt: string;
+	readonly startedAt?: string;
+	readonly finishedAt?: string;
+	readonly updatedAt: string;
+};
+
+export type RunEvent = {
+	readonly sequence: number;
+	readonly data: Record<string, unknown>;
+	readonly createdAt: string;
+};
+
 export type ExecOptions = {
 	/** Receives decoded output chunks as they stream in. */
 	readonly onData: (chunk: Buffer, stream: "stdout" | "stderr") => void;
@@ -128,7 +146,7 @@ export class ScrapdClient {
 		this.token = token;
 	}
 
-	async info(): Promise<{ name: string; version: string; provider?: string }> {
+	async info(): Promise<{ name: string; version: string; provider?: string; features?: { durableRuns?: boolean; modelAuth?: boolean } }> {
 		return this.json("GET", "/v1/info");
 	}
 
@@ -170,6 +188,26 @@ export class ScrapdClient {
 
 	async stopWorkspace(id: string): Promise<void> {
 		await this.request("POST", `/v1/workspaces/${encodeURIComponent(id)}/stop`);
+	}
+
+	async createRun(id: string, prompt: string, sessionKey: string, sessionSnapshot: readonly unknown[] = []): Promise<RunRecord> {
+		return this.json("POST", `/v1/workspaces/${encodeURIComponent(id)}/runs`, { prompt, sessionKey, sessionSnapshot });
+	}
+
+	async getRun(id: string): Promise<RunRecord> {
+		return this.json("GET", `/v1/runs/${encodeURIComponent(id)}`);
+	}
+
+	async runEvents(id: string, after = 0): Promise<RunEvent[]> {
+		const body = await this.json<{ events?: RunEvent[] }>(
+			"GET",
+			`/v1/runs/${encodeURIComponent(id)}/events?after=${encodeURIComponent(String(after))}`,
+		);
+		return body.events ?? [];
+	}
+
+	async cancelRun(id: string): Promise<void> {
+		await this.request("POST", `/v1/runs/${encodeURIComponent(id)}/cancel`);
 	}
 
 	/**
@@ -287,6 +325,37 @@ export class ScrapdClient {
 			{ path: workspaceRelativePath(path) },
 		);
 		return body.entries ?? [];
+	}
+
+	/** Result of an archive import (ADR 0014 directory push). */
+	async pushArchive(
+		id: string,
+		archive: ReadableStream<Uint8Array> | Uint8Array,
+		replace = false,
+	): Promise<{ files: number; bytes: number }> {
+		let response: Response;
+		try {
+			response = await fetch(
+				`${this.baseUrl}/v1/workspaces/${encodeURIComponent(id)}/files/archive${replace ? "?replace=true" : ""}`,
+				{
+					method: "POST",
+					headers: {
+						"Content-Type": "application/x-tar",
+						...(this.token === undefined ? {} : { Authorization: `Bearer ${this.token}` }),
+					},
+					body: archive,
+					// undici requires half-duplex for streaming request bodies.
+					...(archive instanceof Uint8Array ? {} : { duplex: "half" }),
+				} as RequestInit,
+			);
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			throw new ScrapsConnectionError(`cannot reach scrapd at ${this.baseUrl}: ${message}`);
+		}
+		if (!response.ok) {
+			throw await ScrapdApiError.from(response);
+		}
+		return (await response.json()) as { files: number; bytes: number };
 	}
 
 	async glob(id: string, input: GlobInput): Promise<string[]> {

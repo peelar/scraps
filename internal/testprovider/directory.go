@@ -265,6 +265,16 @@ func (d *Directory) Mkdir(_ context.Context, id, path string) error {
 	}
 	return os.MkdirAll(p, 0755)
 }
+func (d *Directory) RemoveAll(_ context.Context, id, path string) error {
+	p, e := d.path(id, path)
+	if e != nil {
+		return e
+	}
+	if p == d.manager.Root() {
+		return &provider.InvalidRequestError{Message: "refusing to remove the workspace root itself"}
+	}
+	return os.RemoveAll(p)
+}
 func (d *Directory) Stat(_ context.Context, id, path string) (fs.FileInfo, error) {
 	p, e := d.path(id, path)
 	if e != nil {

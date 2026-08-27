@@ -108,9 +108,45 @@ sudo "$stage/install"
 GUEST
 }
 
+# True when the guest already runs exactly this release and scrapd answers.
+# The version embeds a hash of the whole working tree, so a match means the
+# bundle we would build is identical — rebuilding and redeploying it would be
+# wasted work (the dominant cost of a warm 'make up').
+#
+# Exit codes: 0 deployed and healthy; 3 definitively not deployed (release
+# mismatch); anything else transient (VM SSH not ready, scrapd still booting).
+# Only the transient case is retried: scrapd comes up a few seconds after
+# limactl start returns, and jumping to a full redeploy because of that race
+# would defeat the skip entirely.
+release_deployed() {
+  local version=$1 attempt rc
+  for attempt in 1 2 3 4 5; do
+    rc=0
+    limactl shell "$VM_NAME" bash -s <<GUEST >/dev/null 2>&1 || rc=$?
+set -euo pipefail
+release=/opt/scraps/releases/$version
+[[ -x "\$release/runner/pi-runner" ]] || exit 3
+grep -qxF '$version' "\$release/VERSION" || exit 3
+[[ "\$(readlink -f /opt/scraps/current)" = "\$release" ]] || exit 3
+curl -fsS --max-time 5 http://127.0.0.1:8484/healthz >/dev/null
+GUEST
+    [[ $rc -eq 0 ]] && return 0
+    [[ $rc -eq 3 ]] && return 1
+    sleep 2
+  done
+  return 1
+}
+
 up() {
   require_lima
   start_vm
+  local version
+  version=$("$ROOT/scripts/release-version")
+  if release_deployed "$version"; then
+    echo "Scraps worker release $version already deployed and healthy; skipping rebuild."
+    echo "Scraps worker VM ready -> http://127.0.0.1:8484"
+    return
+  fi
   local arch
   STAGE=$(mktemp -d)
   trap 'rm -rf -- "${STAGE:-}"' EXIT

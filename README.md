@@ -80,11 +80,12 @@ scrap status
 
 `scrap attach` finds the worker on your tailnet by probing every online peer
 tagged `tag:scraps-worker` (or named `scraps-worker*`) on its Tailscale Serve
-HTTPS endpoint, then reads the endpoint and bearer token over the existing
-SSH trust path (passwordless sudo required) and writes them to a mode-0600
-`~/.config/scraps/client.json` after verifying the daemon answers an
-authenticated `/v1/info`. Pass an explicit target (`scrap attach
-operator@SCRAPS_VM`) to skip discovery; `make configure-remote-client
+HTTPS endpoint. Over the existing SSH trust path (passwordless sudo required),
+it reads the endpoint/token and clones the allowlisted local Pi profile into
+protected worker control-plane storage. It writes connection details to a
+mode-0600 `~/.config/scraps/client.json`, restarts the runner, and verifies that
+the worker is independently ready before returning. Pass an explicit target
+(`scrap attach operator@SCRAPS_VM`) to skip discovery; `make configure-remote-client
 REMOTE=...` is the scripted equivalent.
 
 Then:
@@ -101,6 +102,23 @@ workspaces can be created outside Pi with `scrap new --repo URL [project]`.
 Git SSH/scp origins are normalized to HTTPS by scrapd, and missing authorization
 or clone failures are returned as actionable API errors rather than generic
 internal errors.
+
+### Starting from scratch
+
+Workspaces do not need a repository. `/scrap` in a non-git directory offers to
+copy it into the new workspace as-is (`.git` and uncommitted changes included),
+or the agent can build files from zero inside an empty workspace. Directory
+transfers are explicit one-shot tar archives (ADR 0014):
+
+```bash
+scrap push [--replace] [<workspace-id>] <dir>   # local directory → workspace
+scrap pull [--force] [<workspace-id>] [target]  # workspace → local directory
+```
+
+`push` requires an empty workspace unless `--replace` clears it first; `pull`
+refuses to overwrite a non-empty target without `--force`. Git remains the
+recommended transport for repository work — see
+[ADR 0014](./docs/adr/0014-directory-push-and-pull-archives.md).
 
 ## Durable schedules (experimental)
 
@@ -169,12 +187,36 @@ locally or on the tailnet. Interactive traffic (Vite HMR websockets and the
 like) passes through unchanged, and edits the agent makes appear in your
 browser as the dev server reloads.
 
+## Durable Pi turns
+
+Scraps runs the complete Pi agent loop on the worker so an accepted turn
+continues when the client or its Tailscale connection disappears. Worker
+bundles include checksum-verified Node.js and a lockfile-pinned Pi runner.
+`scrap attach user@worker` clones an allowlisted local Pi profile—including
+protected `auth.json`, model declarations, skills, and prompt templates—over the
+existing SSH/Tailscale trust path. The worker stores it outside OpenShell and
+runs Pi with that cloned profile. `scraps-worker model-auth` remains available
+only as a recovery/headless administration command.
+
+Ordinary `pi` followed by `/scrap` durably captures the active local Pi branch
+and routes every interactive prompt to remote turns. The worker imports that
+branch once and becomes the authoritative conversation. Pi stores the run
+binding locally, polls the append-only event log
+over the same Tailscale Serve HTTPS endpoint, and reconnects on `/resume` or
+`pi -c`. There is no separate durable user mode. `/scrap-cancel` cancels the
+active remote run without treating an ordinary client disconnect as
+cancellation. A worker that does not advertise `features.durableRuns` fails
+closed and must be upgraded or configured; Scraps never silently falls back to
+a laptop-owned agent loop. See the
+[durable Pi handoff](./docs/handoff-durable-pi-default.md) for current
+implementation status and remaining production work.
+
 ## Status
 
 Scraps is an early prototype. OpenShell is the only workspace control plane,
-and Lima is the first local VM driver. Pi runs locally with seven fail-closed,
-workspace-backed tools: `bash`, `read`, `write`, `edit`, `ls`, `find`, and
-`grep`.
+and Lima is the first local VM driver. The Pi TUI runs locally, while the
+durable agent loop runs on the worker with seven fail-closed, workspace-backed
+tools: `bash`, `read`, `write`, `edit`, `ls`, `find`, and `grep`.
 
 ## Development
 

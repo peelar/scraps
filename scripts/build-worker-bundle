@@ -4,19 +4,7 @@ set -euo pipefail
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 ARCH=${1:-}
 OUTPUT=${2:-}
-VERSION=${SCRAPS_VERSION:-$(git -C "$ROOT" describe --tags --always --dirty 2>/dev/null || echo dev)}
-if [[ $VERSION == *-dirty ]]; then
-  dirty_hash=$(
-    cd "$ROOT"
-    {
-      git diff --binary HEAD
-      git ls-files --others --exclude-standard -z | while IFS= read -r -d '' file; do
-        printf '%s\0%s\n' "$file" "$(git hash-object "$file")"
-      done
-    } | git hash-object --stdin | cut -c1-12
-  )
-  VERSION="$VERSION.$dirty_hash"
-fi
+VERSION=$("$ROOT/scripts/release-version")
 
 case "$ARCH" in
   amd64|arm64) ;;
@@ -33,11 +21,82 @@ for cmd in scrap scrapd; do
     -o "$STAGE/bin/$cmd" "./cmd/$cmd")
 done
 install -m 0644 "$ROOT/deploy/worker/manifest.env" "$STAGE/manifest.env"
+# shellcheck source=../deploy/worker/manifest.env
+source "$STAGE/manifest.env"
 install -m 0755 "$ROOT/deploy/worker/install" "$STAGE/install"
 install -m 0755 "$ROOT/deploy/worker/scraps-worker" "$STAGE/bin/scraps-worker"
+install -m 0644 "$ROOT/deploy/worker/pi-package.json" "$STAGE/pi-package.json"
+install -m 0644 "$ROOT/deploy/worker/pi-package-lock.json" "$STAGE/pi-package-lock.json"
+
+# The trusted runner is part of the versioned worker release rather than an
+# unpinned host npm installation. The outer bundle checksum covers this archive;
+# the official Node checksum is also verified before packaging.
+case "$ARCH" in
+  amd64) node_arch=x64; node_sha=$SCRAPS_NODE_SHA256_AMD64 ;;
+  arm64) node_arch=arm64; node_sha=$SCRAPS_NODE_SHA256_ARM64 ;;
+esac
+node_archive="node-v${SCRAPS_NODE_VERSION}-linux-${node_arch}.tar.xz"
+cache_dir=${SCRAPS_DOWNLOAD_CACHE:-"$ROOT/.cache/worker"}
+mkdir -p "$cache_dir"
+if [[ ! -f "$cache_dir/$node_archive" ]] || ! printf '%s  %s\n' "$node_sha" "$cache_dir/$node_archive" | sha256sum -c - >/dev/null 2>&1; then
+  curl --proto '=https' --tlsv1.2 -fL "https://nodejs.org/dist/v${SCRAPS_NODE_VERSION}/$node_archive" -o "$cache_dir/$node_archive.tmp"
+  printf '%s  %s\n' "$node_sha" "$cache_dir/$node_archive.tmp" | sha256sum -c -
+  mv "$cache_dir/$node_archive.tmp" "$cache_dir/$node_archive"
+fi
+# The runner archive depends only on the pinned inputs (Pi package/lock,
+# Node version and checksum, architecture) and this script's generator
+# version, never on the working tree — so cache it and skip the npm ci and
+# tar/gzip work on every subsequent bundle build.
+RUNNER_GENERATOR_VERSION=1
+runner_cache_key=$(
+  {
+    printf 'runner-generator-v%s\n%s\n%s\n%s\n%s\n' \
+      "$RUNNER_GENERATOR_VERSION" "$SCRAPS_PI_VERSION" "$SCRAPS_NODE_VERSION" "$node_sha" "$ARCH"
+    cat "$STAGE/pi-package.json" "$STAGE/pi-package-lock.json"
+  } | sha256sum | cut -d' ' -f1
+)
+runner_cache_tar="$cache_dir/pi-runner-$runner_cache_key.tar.gz"
+runner=""
+trap 'rm -rf -- "$STAGE" "${runner:-}"' EXIT
+if [[ -s $runner_cache_tar ]]; then
+  cp "$runner_cache_tar" "$STAGE/pi-runner.tar.gz"
+else
+  runner=$(mktemp -d)
+  mkdir -p "$runner/node" "$runner/pi"
+  # Normalize directory modes before archiving: mktemp creates 0700, and the
+  # guest extracts this tarball as root, preserving stored modes. A 0700 runner
+  # directory would be untraversable for the scrapd service user.
+  chmod 0755 "$runner" "$runner/node" "$runner/pi"
+  tar -xJf "$cache_dir/$node_archive" --strip-components=1 -C "$runner/node"
+  install -m 0644 "$STAGE/pi-package.json" "$runner/pi/package.json"
+  install -m 0644 "$STAGE/pi-package-lock.json" "$runner/pi/package-lock.json"
+  command -v npm >/dev/null || { echo "npm is required to build the pinned Pi runner" >&2; exit 1; }
+  npm ci --prefix "$runner/pi" --omit=dev --ignore-scripts --no-audit --no-fund --os=linux --cpu="$node_arch"
+  installed_pi=$(node -p "require('$runner/pi/node_modules/@earendil-works/pi-coding-agent/package.json').version")
+  [[ $installed_pi == "$SCRAPS_PI_VERSION" ]] || { echo "Pi version drift: expected $SCRAPS_PI_VERSION, installed $installed_pi" >&2; exit 1; }
+  # Resolve the CLI entry point from the installed package's own bin field
+  # instead of hardcoding a dist layout that can change between versions.
+  pi_bin=$(node -p "require('$runner/pi/node_modules/@earendil-works/pi-coding-agent/package.json').bin.pi")
+  [[ -f $runner/pi/node_modules/@earendil-works/pi-coding-agent/$pi_bin ]] || {
+    echo "Pi CLI entry point missing from the installed package: $pi_bin" >&2
+    exit 1
+  }
+  cat >"$runner/pi-runner" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+ROOT=\$(cd "\$(dirname "\${BASH_SOURCE[0]}")" && pwd)
+exec "\$ROOT/node/bin/node" "\$ROOT/pi/node_modules/@earendil-works/pi-coding-agent/$pi_bin" "\$@"
+EOF
+  chmod 0755 "$runner/pi-runner"
+  COPYFILE_DISABLE=1 tar --no-xattrs -C "$runner" -czf "$STAGE/pi-runner.tar.gz" .
+  # Publish atomically so an interrupted build never caches a partial archive.
+  cp "$STAGE/pi-runner.tar.gz" "$runner_cache_tar.tmp"
+  mv -f "$runner_cache_tar.tmp" "$runner_cache_tar"
+fi
+
 printf '%s\n' "$VERSION" >"$STAGE/VERSION"
 printf 'linux/%s\n' "$ARCH" >"$STAGE/TARGET"
-(cd "$STAGE" && sha256sum bin/scrap bin/scrapd bin/scraps-worker manifest.env install VERSION TARGET >SHA256SUMS)
+(cd "$STAGE" && sha256sum bin/scrap bin/scrapd bin/scraps-worker manifest.env install pi-package.json pi-package-lock.json pi-runner.tar.gz VERSION TARGET >SHA256SUMS)
 mkdir -p "$(dirname "$OUTPUT")"
 COPYFILE_DISABLE=1 tar --no-xattrs -C "$STAGE" -czf "$OUTPUT" .
 echo "$OUTPUT"

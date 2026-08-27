@@ -25,6 +25,7 @@ import {
 } from "./identity.ts";
 import { createRemoteBashOps } from "./operations.ts";
 import { adaptSystemPrompt } from "./prompt.ts";
+import { registerDurableRuns } from "./runs.ts";
 import { portsHint, statusText } from "./workspace.ts";
 import { REMOTE_TOOL_NAMES, registerRemoteTools } from "./tools.ts";
 import { WorkspaceSession, describeError } from "./workspace.ts";
@@ -178,4 +179,9 @@ export default function scrapsExtension(pi: ExtensionAPI): void {
 		}
 		return { operations: createRemoteBashOps(session, approvedEnv) };
 	});
+
+	// The worker owns the complete agent loop in Scraps mode. The ordinary
+	// local TUI becomes a reconnectable client while `/scrap` remains the only
+	// user-facing activation command; missing runner support fails closed.
+	registerDurableRuns(pi, session);
 }

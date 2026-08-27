@@ -97,6 +97,29 @@ CREATE TABLE IF NOT EXISTS schedule_occurrences (
 );
 CREATE INDEX IF NOT EXISTS schedule_due_idx ON schedules(enabled, next_run_at);
 CREATE INDEX IF NOT EXISTS occurrence_claim_idx ON schedule_occurrences(state, lease_until, scheduled_at);
+CREATE TABLE IF NOT EXISTS runs (
+	id           TEXT PRIMARY KEY,
+	workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+	session_key  TEXT NOT NULL,
+	prompt       TEXT NOT NULL,
+	session_snapshot BLOB NOT NULL DEFAULT '[]',
+	state        TEXT NOT NULL DEFAULT 'queued',
+	error        TEXT NOT NULL DEFAULT '',
+	created_at   INTEGER NOT NULL,
+	started_at   INTEGER,
+	finished_at  INTEGER,
+	updated_at   INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS run_workspace_state_idx ON runs(workspace_id, state, created_at);
+CREATE UNIQUE INDEX IF NOT EXISTS run_one_active_workspace_idx ON runs(workspace_id)
+	WHERE state IN ('queued', 'running');
+CREATE TABLE IF NOT EXISTS run_events (
+	run_id     TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+	sequence   INTEGER NOT NULL,
+	data       BLOB NOT NULL,
+	created_at INTEGER NOT NULL,
+	PRIMARY KEY(run_id, sequence)
+);
 PRAGMA foreign_keys = ON;`)
 	if err != nil {
 		return fmt.Errorf("migrate database: %w", err)
@@ -124,6 +147,29 @@ PRAGMA foreign_keys = ON;`)
 	if !hasProvider {
 		if _, err := s.db.Exec(`ALTER TABLE workspaces ADD COLUMN provider TEXT NOT NULL DEFAULT 'directory'`); err != nil {
 			return fmt.Errorf("add workspace provider: %w", err)
+		}
+	}
+	runColumns, err := s.db.Query(`PRAGMA table_info(runs)`)
+	if err != nil {
+		return fmt.Errorf("inspect run schema: %w", err)
+	}
+	hasSessionSnapshot := false
+	for runColumns.Next() {
+		var cid, notnull, pk int
+		var name, typ string
+		var defaultValue any
+		if err := runColumns.Scan(&cid, &name, &typ, &notnull, &defaultValue, &pk); err != nil {
+			runColumns.Close()
+			return err
+		}
+		if name == "session_snapshot" {
+			hasSessionSnapshot = true
+		}
+	}
+	runColumns.Close()
+	if !hasSessionSnapshot {
+		if _, err := s.db.Exec(`ALTER TABLE runs ADD COLUMN session_snapshot BLOB NOT NULL DEFAULT '[]'`); err != nil {
+			return fmt.Errorf("add run session snapshot: %w", err)
 		}
 	}
 	return nil

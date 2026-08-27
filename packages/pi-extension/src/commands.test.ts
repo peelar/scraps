@@ -32,6 +32,8 @@ function commandHarness(
 	options: {
 		detectRemote?: (cwd: string) => Promise<string | undefined>;
 		confirmAnswer?: boolean;
+		inspectLocalDirectory?: (cwd: string) => Promise<number>;
+		buildLocalArchive?: (cwd: string) => Promise<ReadableStream<Uint8Array>>;
 	} = {},
 ) {
 	const commands = new Map<string, CommandHandler>();
@@ -53,6 +55,11 @@ function commandHarness(
 		(binding) => bindings.push(binding),
 		() => {},
 		options.detectRemote ?? (async () => undefined),
+		options.inspectLocalDirectory ?? (async () => 0),
+		options.buildLocalArchive ??
+			(async () => {
+				throw new Error("unexpected archive build");
+			}),
 	);
 	const ctx = {
 		cwd: "/tmp/project",
@@ -256,5 +263,124 @@ describe("/scrap toss", () => {
 		assert.equal(session.connectedWorkspace?.id, "quiet-river");
 		assert.equal(harness.bindings.length, 0);
 		assert.ok(harness.notices.at(-1)?.message.includes("Still using the remote workspace"));
+	});
+});
+
+describe("/scrap directory copy (ADR 0014)", () => {
+	function archiveStream(): Promise<ReadableStream<Uint8Array>> {
+		const stream = new ReadableStream<Uint8Array>({
+			start(controller) {
+				controller.enqueue(new Uint8Array([0x01, 0x02]));
+				controller.close();
+			},
+		});
+		return Promise.resolve(stream);
+	}
+
+	it("offers a literal copy when there is no git remote and the directory has files", async () => {
+		const pushes: Array<{ id: string; replace: boolean }> = [];
+		const client = fakeClient({
+			createWorkspace: async () => ({ ...record, id: "fresh-cove" }),
+			pushArchive: async (id: string, _archive: ReadableStream<Uint8Array>, replace: boolean | undefined) => {
+				pushes.push({ id, replace: replace ?? false });
+				return { files: 3, bytes: 42 };
+			},
+			readdir: async () => ["README.md"],
+		});
+		const session = new WorkspaceSession(() => client);
+		const harness = commandHarness(session, {
+			inspectLocalDirectory: async () => 3,
+			buildLocalArchive: archiveStream,
+		});
+
+		await harness.commands.get("scrap")?.("", harness.ctx);
+
+		assert.deepEqual(pushes, [{ id: "fresh-cove", replace: false }]);
+		assert.ok(harness.confirms[0]?.title.includes("Copy this directory"));
+		assert.ok(harness.confirms[0]?.body.includes("3 entries"));
+		assert.ok(harness.notices.some((notice) => notice.message.includes("Copied 3 files (42 bytes)")));
+	});
+
+	it("skips the offer for an empty local directory", async () => {
+		const client = fakeClient({
+			createWorkspace: async () => ({ ...record, id: "fresh-cove" }),
+			readdir: async () => [],
+		});
+		const session = new WorkspaceSession(() => client);
+		const harness = commandHarness(session, {
+			inspectLocalDirectory: async () => 0,
+		});
+
+		await harness.commands.get("scrap")?.("", harness.ctx);
+
+		assert.deepEqual(harness.confirms, []);
+		assert.ok(harness.notices.some((notice) => notice.message.includes("is empty")));
+	});
+
+	it("does not push when the offer is declined", async () => {
+		let pushed = false;
+		const client = fakeClient({
+			createWorkspace: async () => ({ ...record, id: "fresh-cove" }),
+			pushArchive: async () => {
+				pushed = true;
+				return { files: 3, bytes: 42 };
+			},
+			readdir: async () => [],
+		});
+		const session = new WorkspaceSession(() => client);
+		const harness = commandHarness(session, {
+			confirmAnswer: false,
+			inspectLocalDirectory: async () => 3,
+			buildLocalArchive: archiveStream,
+		});
+
+		await harness.commands.get("scrap")?.("", harness.ctx);
+
+		assert.equal(harness.confirms.length, 1);
+		assert.equal(pushed, false);
+	});
+
+	it("falls back to the CLI hint when the copy fails", async () => {
+		const client = fakeClient({
+			createWorkspace: async () => ({ ...record, id: "fresh-cove" }),
+			pushArchive: async () => {
+				throw new Error("disk full");
+			},
+			readdir: async () => [],
+		});
+		const session = new WorkspaceSession(() => client);
+		const harness = commandHarness(session, {
+			inspectLocalDirectory: async () => 3,
+			buildLocalArchive: archiveStream,
+		});
+
+		await harness.commands.get("scrap")?.("", harness.ctx);
+
+		const warning = harness.notices.find((notice) => notice.level === "warning");
+		assert.ok(warning?.message.includes("scrap push fresh-cove"));
+	});
+
+	it("still offers the git clone when a remote exists", async () => {
+		const pushes: number[] = [];
+		const client = fakeClient({
+			createWorkspace: async () => ({ ...record, id: "fresh-cove" }),
+			pushArchive: async () => {
+				pushes.push(1);
+				return { files: 0, bytes: 0 };
+			},
+			readdir: async () => [],
+		});
+		const session = new WorkspaceSession(() => client);
+		const harness = commandHarness(session, {
+			detectRemote: async () => "https://github.com/owner/repo.git",
+			inspectLocalDirectory: async () => 3,
+			buildLocalArchive: archiveStream,
+		});
+
+		await harness.commands.get("scrap")?.("", harness.ctx);
+
+		assert.equal(harness.confirms.length, 1);
+		assert.ok(harness.confirms[0]?.title.includes("Clone repository"));
+		assert.deepEqual(pushes, []);
 	});
 });

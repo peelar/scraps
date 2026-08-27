@@ -32,7 +32,7 @@ available_kib=$(df --output=avail / | tail -1 | tr -d ' ')
 
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
-apt-get install -y --no-install-recommends age ca-certificates curl sqlite3 uidmap
+apt-get install -y --no-install-recommends age ca-certificates curl python3 sqlite3 uidmap
 if ! command -v docker >/dev/null 2>&1; then
   apt-get install -y --no-install-recommends docker.io
 fi
@@ -58,13 +58,20 @@ usermod -aG docker "$SCRAPS_SERVICE_USER"
 loginctl enable-linger "$SCRAPS_SERVICE_USER"
 install -d -o root -g root -m 0755 /opt/scraps/releases
 install -d -o "$SCRAPS_SERVICE_USER" -g "$SCRAPS_SERVICE_USER" -m 0750 \
-  /var/lib/scraps "$SCRAPS_DATA_DIR" /var/lib/scraps/openshell /var/lib/scraps/openshell-data /var/lib/scraps/workspaces
+  /var/lib/scraps "$SCRAPS_DATA_DIR" "$SCRAPS_DATA_DIR/pi-profile" /var/lib/scraps/openshell /var/lib/scraps/openshell-data /var/lib/scraps/workspaces
 chown -R "$SCRAPS_SERVICE_USER:$SCRAPS_SERVICE_USER" /var/lib/scraps
 install -d -o root -g "$SCRAPS_SERVICE_USER" -m 0750 /etc/scraps
 install -d -o root -g root -m 0700 "$SCRAPS_BACKUP_ROOT"
 install -d -o root -g root -m 0755 "$RELEASE_DIR/bin"
 install -m 0755 "$SOURCE/bin/scrap" "$SOURCE/bin/scrapd" "$SOURCE/bin/scraps-worker" "$RELEASE_DIR/bin/"
 install -m 0644 "$SOURCE/manifest.env" "$SOURCE/VERSION" "$SOURCE/TARGET" "$RELEASE_DIR/"
+install -d -o root -g root -m 0755 "$RELEASE_DIR/runner"
+tar -xzf "$SOURCE/pi-runner.tar.gz" --no-same-owner -C "$RELEASE_DIR/runner"
+[[ -x $RELEASE_DIR/runner/pi-runner ]] || { echo "durable Pi runner is missing from the release" >&2; exit 1; }
+[[ $($RELEASE_DIR/runner/pi-runner --version) == *"$SCRAPS_PI_VERSION"* ]] || {
+  echo "durable Pi runner version check failed (expected $SCRAPS_PI_VERSION)" >&2
+  exit 1
+}
 
 if [[ ! -e "$ENV_FILE" ]]; then
   token=$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')
@@ -78,6 +85,9 @@ EOF
 fi
 chmod 0640 "$ENV_FILE"
 chown root:"$SCRAPS_SERVICE_USER" "$ENV_FILE"
+if [[ ! -e /etc/scraps/model.env ]]; then
+  install -o root -g "$SCRAPS_SERVICE_USER" -m 0640 /dev/null /etc/scraps/model.env
+fi
 
 install -d -o "$SCRAPS_SERVICE_USER" -g "$SCRAPS_SERVICE_USER" -m 0755 /home/"$SCRAPS_SERVICE_USER"/.config/openshell
 install -d -o "$SCRAPS_SERVICE_USER" -g "$SCRAPS_SERVICE_USER" -m 0755 /home/"$SCRAPS_SERVICE_USER"/.local/state
@@ -142,15 +152,20 @@ as_service openshell status >/dev/null
 # preserve the independently managed bearer token.
 updated_env=$(mktemp /etc/scraps/scrapd.env.XXXXXX)
 found_image=false
+found_pi_command=false
 while IFS= read -r line; do
   if [[ $line == SCRAPD_OPENSHELL_IMAGE=* ]]; then
     printf 'SCRAPD_OPENSHELL_IMAGE=%s\n' "$WORKSPACE_IMAGE"
     found_image=true
+  elif [[ $line == SCRAPD_PI_COMMAND=* ]]; then
+    printf 'SCRAPD_PI_COMMAND=/opt/scraps/current/runner/pi-runner\n'
+    found_pi_command=true
   else
     printf '%s\n' "$line"
   fi
 done <"$ENV_FILE" >"$updated_env"
 if [[ $found_image == false ]]; then printf 'SCRAPD_OPENSHELL_IMAGE=%s\n' "$WORKSPACE_IMAGE" >>"$updated_env"; fi
+if [[ $found_pi_command == false ]]; then printf 'SCRAPD_PI_COMMAND=/opt/scraps/current/runner/pi-runner\n' >>"$updated_env"; fi
 chown root:"$SCRAPS_SERVICE_USER" "$updated_env"
 chmod 0640 "$updated_env"
 mv "$updated_env" "$ENV_FILE"
@@ -172,6 +187,7 @@ Group=$SCRAPS_SERVICE_USER
 Environment=HOME=/home/$SCRAPS_SERVICE_USER
 Environment=PATH=/opt/scraps/current/bin:/home/$SCRAPS_SERVICE_USER/.local/bin:/usr/local/bin:/usr/bin:/bin
 EnvironmentFile=$ENV_FILE
+EnvironmentFile=-/etc/scraps/model.env
 ExecStart=/opt/scraps/current/bin/scrapd
 Restart=on-failure
 RestartSec=3
@@ -242,4 +258,10 @@ systemctl enable scrapd.service >/dev/null
 systemctl enable --now scraps-health.timer >/dev/null
 systemctl restart scrapd.service
 timeout 30 bash -c 'until curl -fsS http://127.0.0.1:8484/healthz >/dev/null; do sleep 1; done'
-echo "Scraps worker $BUNDLE_VERSION is ready on loopback. Run: scraps-worker diagnostics"
+installed_token=$(sed -n 's/^SCRAPD_TOKEN=//p' "$ENV_FILE" | tail -1)
+runner_info=$(curl -fsS -H "Authorization: Bearer $installed_token" http://127.0.0.1:8484/v1/info)
+[[ $runner_info == *'"durableRuns":true'* ]] || {
+  echo "worker started without the required durable Pi capability" >&2
+  exit 1
+}
+echo "Scraps worker $BUNDLE_VERSION is ready on loopback with durable Pi $SCRAPS_PI_VERSION. Run: scraps-worker diagnostics"

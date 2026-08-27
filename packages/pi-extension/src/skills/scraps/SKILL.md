@@ -44,6 +44,22 @@ attached. The reliable recipe:
 - `/scrap toss` — permanently delete it and return tools to local
 - CLI: `scrap ls`, `scrap start/stop ID`, `scrap rm ID`
 
+## Moving directories and workspaces
+
+Local files are never synced automatically. To move a local directory into a
+workspace, or workspace files back to the machine, use the one-shot archive
+transfer (ADR 0014) in a local terminal:
+
+- `scrap push [<workspace-id>] <dir>` — copy a local directory into an empty
+  workspace (literal copy, `.git` included). Add `--replace` to clear the
+  workspace first.
+- `scrap pull [<workspace-id>] [target]` — copy the workspace into a fresh
+  local directory. Add `--force` to overlay an existing directory.
+
+`/scrap` in a non-git directory offers the same copy at creation time.
+Without a repository, this is the way to seed a workspace and to get agent
+work back out (the other exit is pushing to a git remote).
+
 ## Missing environment variables
 
 Scraps deliberately does not copy Pi's ordinary local environment into a

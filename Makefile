@@ -1,8 +1,9 @@
 INSTALL_DIR ?= $(HOME)/.local/bin
 .PHONY: build build-go check clean configure configure-remote-client deploy-worker down homelab-acceptance homelab-smoke install sync-extension test uninstall up vm-delete vm-down vm-shell vm-status vm-up worker-bundles worker-check
 
-# Default deployment: OpenShell, its runtime, scrapd, and workspace data live
-# inside one ordinary Linux worker VM. Pi and the client remain on this host.
+# Default deployment: OpenShell, its runtime, scrapd, workspace data, and the
+# durable headless Pi runner live inside one ordinary Linux worker VM. The Pi
+# TUI remains on this host as a reconnectable client.
 up: install
 	./scripts/worker-vm up
 
@@ -13,7 +14,7 @@ deploy-worker:
 	@test -n "$(REMOTE)" || { echo "usage: make deploy-worker REMOTE=user@worker-host" >&2; exit 2; }
 	./scripts/deploy-worker "$(REMOTE)"
 
-configure-remote-client:
+configure-remote-client: build
 	@test -n "$(REMOTE)" || { echo "usage: make configure-remote-client REMOTE=user@worker-host" >&2; exit 2; }
 	./scripts/configure-remote-client "$(REMOTE)"
 

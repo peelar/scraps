@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# Print the worker release version string.
+#
+# Shared by build-worker-bundle (which embeds it in the bundle) and worker-vm
+# (which skips redeploying when the guest already runs this exact release).
+# The dirty-tree hash makes the version change whenever any tracked or
+# untracked file changes, so an unchanged tree always produces the same
+# version — the property the redeploy skip relies on.
+set -euo pipefail
+
+ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+VERSION=${SCRAPS_VERSION:-$(git -C "$ROOT" describe --tags --always --dirty 2>/dev/null || echo dev)}
+if [[ $VERSION == *-dirty ]]; then
+  dirty_hash=$(
+    cd "$ROOT"
+    {
+      git diff --binary HEAD
+      git ls-files --others --exclude-standard -z | while IFS= read -r -d '' file; do
+        printf '%s\0%s\n' "$file" "$(git hash-object "$file")"
+      done
+    } | git hash-object --stdin | cut -c1-12
+  )
+  VERSION="$VERSION.$dirty_hash"
+fi
+printf '%s\n' "$VERSION"

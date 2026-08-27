@@ -23,8 +23,9 @@ const attachUsage = `usage: scrap attach [user@]worker
 
 Discover a Scraps worker on this tailnet and configure this computer to use
 it. The worker's Tailscale endpoint and bearer token are fetched over the
-existing SSH trust path and written to the mode-0600 client profile that the
-scrap CLI and the Pi extension load automatically.
+existing SSH trust path. The same path clones an allowlisted local Pi profile
+to protected worker control-plane storage. Connection details are written to
+the mode-0600 client profile that the scrap CLI and Pi extension load.
 
 Without an argument, every online tailnet peer tagged tag:scraps-worker (or
 named scraps-worker*) is probed on its Tailscale Serve HTTPS endpoint and must
@@ -115,10 +116,13 @@ func runAttach(args []string) int {
 	}
 	var profile clientConfig
 	var err error
+	connectedTarget := ""
 	for _, candidate := range tryUsers {
 		fmt.Printf("Fetching worker profile from %s@%s...\n", candidate, host)
-		profile, err = fetchWorkerProfile(candidate + "@" + host)
+		candidateTarget := candidate + "@" + host
+		profile, err = fetchWorkerProfile(candidateTarget)
 		if err == nil {
+			connectedTarget = candidateTarget
 			break
 		}
 	}
@@ -139,6 +143,28 @@ func runAttach(args []string) int {
 		fmt.Fprintf(os.Stderr, "scrap: %s is not a scrapd daemon (name %q)\n", profile.DaemonURL, info.Name)
 		return 1
 	}
+
+	fmt.Printf("Cloning the trusted local Pi profile to %s...\n", connectedTarget)
+	manifest, err := syncRunnerProfile(connectedTarget)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "scrap: could not clone the local Pi profile: %v\n", err)
+		return 1
+	}
+	// profile-install restarts scrapd. Verify the post-clone acceptance boundary:
+	// the durable runner and independent model authorization must both be ready.
+	ctx, cancel = context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	info, err = client.New(profile.DaemonURL, profile.Token).Info(ctx)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "scrap: cloned profile installed, but scrapd did not return: %v\n", err)
+		return 1
+	}
+	if !info.Features.DurableRuns || !info.Features.ModelAuth {
+		fmt.Fprintln(os.Stderr, "scrap: worker is not self-sufficient after profile cloning")
+		fmt.Fprintln(os.Stderr, "store model authorization in local Pi auth.json, then retry scrap attach")
+		return 1
+	}
+	fmt.Printf("Cloned Pi profile %s; durable runner is independently authorized.\n", manifest.Generation[:12])
 
 	path := clientProfilePath()
 	// Re-attaching changes connection details, but environment approvals are

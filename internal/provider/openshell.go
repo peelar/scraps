@@ -556,6 +556,23 @@ func (o *OpenShell) Mkdir(ctx context.Context, id, p string) error {
 	_, e = o.execOutput(ctx, id, nil, "mkdir", "-p", p)
 	return e
 }
+func (o *OpenShell) RemoveAll(ctx context.Context, id, p string) error {
+	relative, err := validateRelative(p)
+	if err != nil {
+		return err
+	}
+	if relative == "." {
+		return &InvalidRequestError{Message: "refusing to remove the workspace root itself"}
+	}
+	cp, e := o.containerPath(ctx, id, p)
+	if e != nil {
+		return e
+	}
+	// `rm -rf --` with the container-contained path: containerPath resolves
+	// symlinks through the containment script before anything is deleted.
+	_, e = o.execOutput(ctx, id, nil, "rm", "-rf", "--", cp)
+	return e
+}
 func (o *OpenShell) Access(ctx context.Context, id, p string, m AccessMode) error {
 	cp, e := o.containerPath(ctx, id, p)
 	if e != nil {

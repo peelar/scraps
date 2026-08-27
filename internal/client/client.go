@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -119,6 +120,13 @@ type InfoResponse struct {
 	Isolation string          `json:"isolation"`
 	Image     string          `json:"image,omitempty"`
 	Policy    provider.Policy `json:"policy"`
+	Features  InfoFeatures    `json:"features"`
+}
+
+// InfoFeatures reports required worker capabilities.
+type InfoFeatures struct {
+	DurableRuns bool `json:"durableRuns"`
+	ModelAuth   bool `json:"modelAuth"`
 }
 
 // Info fetches daemon identity.
@@ -209,6 +217,84 @@ func (c *Client) StopWorkspace(ctx context.Context, id string) (workspace.Worksp
 // DeleteWorkspace removes a workspace.
 func (c *Client) DeleteWorkspace(ctx context.Context, id string) error {
 	return c.do(ctx, http.MethodDelete, "/v1/workspaces/"+id, nil, nil)
+}
+
+// ArchiveResult reports what an archive import wrote.
+type ArchiveResult struct {
+	Files int   `json:"files"`
+	Bytes int64 `json:"bytes"`
+}
+
+// PushArchive streams a tar archive from r into the workspace. When replace
+// is true the daemon clears the workspace first; otherwise the workspace must
+// be empty. Uses the unbounded streaming transport like tunnels.
+func (c *Client) PushArchive(ctx context.Context, id string, r io.Reader, replace bool) (ArchiveResult, error) {
+	path := fmt.Sprintf("/v1/workspaces/%s/files/archive", url.PathEscape(id))
+	if replace {
+		path += "?replace=true"
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, r)
+	if err != nil {
+		return ArchiveResult{}, fmt.Errorf("build push request: %w", err)
+	}
+	request.Header.Set("Content-Type", "application/x-tar")
+	if c.token != "" {
+		request.Header.Set("Authorization", "Bearer "+c.token)
+	}
+	response, err := c.stream.Do(request)
+	if err != nil {
+		return ArchiveResult{}, fmt.Errorf("push archive: %w", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode >= 400 {
+		return ArchiveResult{}, decodeErrorResponse(response)
+	}
+	var result ArchiveResult
+	if err := json.NewDecoder(response.Body).Decode(&result); err != nil {
+		return ArchiveResult{}, fmt.Errorf("decode push response: %w", err)
+	}
+	return result, nil
+}
+
+// PullArchive streams the workspace archive into w and returns the number of
+// entries the daemon skipped (oversized or non-regular files).
+func (c *Client) PullArchive(ctx context.Context, id string, w io.Writer) (int, error) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		fmt.Sprintf("%s/v1/workspaces/%s/files/archive", c.baseURL, url.PathEscape(id)), nil)
+	if err != nil {
+		return 0, fmt.Errorf("build pull request: %w", err)
+	}
+	if c.token != "" {
+		request.Header.Set("Authorization", "Bearer "+c.token)
+	}
+	response, err := c.stream.Do(request)
+	if err != nil {
+		return 0, fmt.Errorf("pull archive: %w", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode >= 400 {
+		return 0, decodeErrorResponse(response)
+	}
+	if _, err := io.Copy(w, response.Body); err != nil {
+		return 0, fmt.Errorf("pull archive: %w", err)
+	}
+	skipped, _ := strconv.Atoi(response.Header.Get("X-Scraps-Skipped-Entries"))
+	return skipped, nil
+}
+
+// decodeErrorResponse parses the structured error body of a failed stream
+// request, falling back to the HTTP status line.
+func decodeErrorResponse(response *http.Response) error {
+	var payload struct {
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if json.NewDecoder(response.Body).Decode(&payload) == nil && payload.Error.Code != "" {
+		return &Error{Status: response.StatusCode, Code: payload.Error.Code, Message: payload.Error.Message}
+	}
+	return &Error{Status: response.StatusCode, Code: "http_error", Message: response.Status}
 }
 
 // PortInfo describes a TCP listener inside a workspace.

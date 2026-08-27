@@ -231,6 +231,21 @@ flow works unchanged.
   blocked.
 - [x] Document reauthorization, repository selection changes, and App removal.
 
+## Directory push and pull (ADR 0014)
+
+- [x] `POST/GET /v1/workspaces/{id}/files/archive` streaming tar import and
+  export with path-containment validation, regular-files-and-directories-only
+  imports, per-file and whole-archive size limits, and `.scrap` exclusion.
+- [x] Provider `RemoveAll` primitive (directory provider and OpenShell) backing
+  `replace=true` workspace clears.
+- [x] `scrap push [--replace]` and `scrap pull [--force]` CLI verbs.
+- [x] `/scrap` and `/scrap-new` offer a literal directory copy for non-git
+  directories, with the system `tar` stream wired to the archive API.
+- [x] Document the flow in README, the Scraps skill, and ADR 0014.
+- [ ] OpenShell provider `RemoveAll` exercised end-to-end on a real sandbox.
+- [ ] Consider extension-side pull (`/scrap pull`) if users want workspace
+  extraction without leaving Pi.
+
 ## Phase 7 — Persistence, backup, recovery, and upgrades
 
 - [x] Inventory every durable path: `scrapd` SQLite/database files, GitHub App

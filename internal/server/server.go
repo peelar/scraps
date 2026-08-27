@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/peelar/scraps/internal/githubapp"
@@ -31,19 +32,37 @@ type Config struct {
 	Provider provider.Provider
 	// OpenShellImage overrides the image used for OpenShell sandboxes.
 	OpenShellImage string
+	// Runner overrides durable Pi execution, primarily for tests.
+	Runner RunExecutor
+	// PiCommand and PiExtensionPath enable the built-in durable runner.
+	PiCommand       string
+	PiExtensionPath string
+	PiProfilePath   string
+	// DaemonURL is the loopback URL remote Pi processes use for workspace tools.
+	DaemonURL string
+	// ModelAuthConfigured reports whether the trusted runner can authenticate a model.
+	ModelAuthConfigured bool
 }
 
 // Server wires a workspace provider and HTTP routes.
 type Server struct {
-	provider provider.Provider
-	token    string
-	handler  http.Handler
-	dataDir  string
-	started  time.Time
-	pool     *readyPool
-	github   *githubapp.Manager
-	store    *store.Store
-	clock    *schedule.Engine
+	provider            provider.Provider
+	token               string
+	handler             http.Handler
+	dataDir             string
+	started             time.Time
+	pool                *readyPool
+	github              *githubapp.Manager
+	store               *store.Store
+	clock               *schedule.Engine
+	runner              RunExecutor
+	runContext          context.Context
+	cancelRuns          context.CancelFunc
+	runWG               sync.WaitGroup
+	runMu               sync.Mutex
+	activeRuns          map[string]string
+	runCancels          map[string]context.CancelFunc
+	modelAuthConfigured bool
 }
 
 // New opens the store under the data dir and builds the HTTP handler.
@@ -57,6 +76,10 @@ func New(config Config) (*Server, error) {
 
 	st, err := store.Open(filepath.Join(config.DataDir, "scrapd.db"))
 	if err != nil {
+		return nil, err
+	}
+	if _, err := st.ReconcileInterruptedRuns(context.Background()); err != nil {
+		st.Close()
 		return nil, err
 	}
 	runtime := config.Provider
@@ -73,13 +96,32 @@ func New(config Config) (*Server, error) {
 		st.Close()
 		return nil, err
 	}
+	runContext, cancelRuns := context.WithCancel(context.Background())
 	server := &Server{
-		provider: runtime,
-		token:    config.Token,
-		dataDir:  config.DataDir,
-		started:  time.Now(),
-		github:   github,
-		store:    st,
+		provider:            runtime,
+		token:               config.Token,
+		dataDir:             config.DataDir,
+		started:             time.Now(),
+		github:              github,
+		store:               st,
+		runner:              config.Runner,
+		runContext:          runContext,
+		cancelRuns:          cancelRuns,
+		activeRuns:          make(map[string]string),
+		runCancels:          make(map[string]context.CancelFunc),
+		modelAuthConfigured: config.ModelAuthConfigured,
+	}
+	if server.runner == nil && config.PiCommand != "" && config.PiExtensionPath != "" {
+		daemonURL := config.DaemonURL
+		if daemonURL == "" {
+			daemonURL = "http://127.0.0.1:8484"
+		}
+		profilePath := config.PiProfilePath
+		if profilePath == "" {
+			profilePath = filepath.Join(config.DataDir, "pi-profile")
+		}
+		server.runner = &commandRunExecutor{command: config.PiCommand, extensionPath: config.PiExtensionPath,
+			profilePath: profilePath, dataDir: config.DataDir, daemonURL: daemonURL, token: config.Token}
 	}
 	server.clock = schedule.NewEngine(st)
 	server.pool = newReadyPool(runtime)
@@ -89,6 +131,8 @@ func New(config Config) (*Server, error) {
 
 // Close releases server resources.
 func (s *Server) Close() {
+	s.cancelRuns()
+	s.runWG.Wait()
 	s.pool.close()
 	s.clock.Close()
 	s.github.Close()
@@ -128,10 +172,16 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("DELETE /v1/workspaces/{id}", s.requireAuth(s.deleteWorkspace))
 
 	mux.HandleFunc("POST /v1/workspaces/{id}/exec", s.requireAuth(s.execCommand))
+	mux.HandleFunc("POST /v1/workspaces/{id}/runs", s.requireAuth(s.createRun))
+	mux.HandleFunc("GET /v1/runs/{id}", s.requireAuth(s.getRun))
+	mux.HandleFunc("GET /v1/runs/{id}/events", s.requireAuth(s.listRunEvents))
+	mux.HandleFunc("POST /v1/runs/{id}/cancel", s.requireAuth(s.cancelRun))
 
 	mux.HandleFunc("GET /v1/workspaces/{id}/ports", s.requireAuth(s.workspacePorts))
 	mux.HandleFunc("POST /v1/workspaces/{id}/tunnel/{port}", s.requireAuth(s.tunnel))
 
+	mux.HandleFunc("POST /v1/workspaces/{id}/files/archive", s.requireAuth(s.archiveImport))
+	mux.HandleFunc("GET /v1/workspaces/{id}/files/archive", s.requireAuth(s.archiveExport))
 	mux.HandleFunc("POST /v1/workspaces/{id}/files/read", s.requireAuth(s.fileRead))
 	mux.HandleFunc("POST /v1/workspaces/{id}/files/write", s.requireAuth(s.fileWrite))
 	mux.HandleFunc("POST /v1/workspaces/{id}/files/mkdir", s.requireAuth(s.fileMkdir))
@@ -164,6 +214,10 @@ func info(server *Server) http.HandlerFunc {
 			Isolation: string(providerInfo.Isolation),
 			Image:     providerInfo.Image,
 			Policy:    providerInfo.Policy,
+			Features: infoFeatures{
+				DurableRuns: server.runner != nil,
+				ModelAuth:   server.modelAuthConfigured,
+			},
 		})
 	}
 }
@@ -179,6 +233,12 @@ type infoResponse struct {
 	Isolation string          `json:"isolation"`
 	Image     string          `json:"image,omitempty"`
 	Policy    provider.Policy `json:"policy"`
+	Features  infoFeatures    `json:"features"`
+}
+
+type infoFeatures struct {
+	DurableRuns bool `json:"durableRuns"`
+	ModelAuth   bool `json:"modelAuth"`
 }
 
 // requireAuth enforces the bearer token when one is configured.

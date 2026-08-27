@@ -154,6 +154,18 @@ All take `{path, ...}` with workspace-relative validated paths:
 - No auth on `/v1/info` (name/version only); everything else is gated when a
   token is configured.
 
+### Bulk archive transfer (added by ADR 0014)
+
+- `POST /v1/workspaces/{id}/files/archive` (`Content-Type: application/x-tar`)
+  streams an archive into the workspace. The workspace
+  must be empty unless `?replace=true` clears it first; only regular files and
+  directories are imported and names must stay workspace-relative.
+- `GET /v1/workspaces/{id}/files/archive` streams the workspace as a tar
+  archive, excluding `.scrap/**`; skipped entries are counted in
+  `X-Scraps-Skipped-Entries`.
+
+See [ADR 0014](./0014-directory-push-and-pull-archives.md) for semantics.
+
 ### Path-contract migration
 
 The original M1 contract returned directory-provider host paths. The migration

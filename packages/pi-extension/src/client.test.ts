@@ -53,6 +53,31 @@ async function startFakeDaemon(): Promise<FakeDaemon> {
 				return;
 			}
 
+			if (route === "POST /v1/workspaces/ws-1/runs") {
+				const input = body as { prompt: string; sessionKey: string };
+				response.writeHead(202, { "Content-Type": "application/json" });
+				response.end(JSON.stringify({ id: "run-1", workspaceId: "ws-1", sessionKey: input.sessionKey, state: "queued", createdAt: new Date(0).toISOString(), updatedAt: new Date(0).toISOString() }));
+				return;
+			}
+
+			if (route === "GET /v1/runs/run-1") {
+				response.writeHead(200, { "Content-Type": "application/json" });
+				response.end(JSON.stringify({ id: "run-1", workspaceId: "ws-1", sessionKey: "pi-session", state: "succeeded", createdAt: new Date(0).toISOString(), updatedAt: new Date(0).toISOString() }));
+				return;
+			}
+
+			if (route === "GET /v1/runs/run-1/events?after=3") {
+				response.writeHead(200, { "Content-Type": "application/json" });
+				response.end(JSON.stringify({ events: [{ sequence: 4, data: { type: "agent_end" }, createdAt: new Date(0).toISOString() }] }));
+				return;
+			}
+
+			if (route === "POST /v1/runs/run-1/cancel") {
+				response.writeHead(202, { "Content-Type": "application/json" });
+				response.end(JSON.stringify({ id: "run-1", state: "cancelling" }));
+				return;
+			}
+
 			if (route === "POST /v1/workspaces/ws-1/files/write") {
 				const input = body as { path: string; content: string };
 				files.set(input.path, Buffer.from(input.content, "base64"));
@@ -155,6 +180,24 @@ describe("workspaceRelativePath", () => {
 });
 
 describe("ScrapdClient", () => {
+	it("creates durable runs and resumes their event cursor", async () => {
+		const daemon = await startFakeDaemon();
+		try {
+			const client = new ScrapdClient(daemon.url);
+			const created = await client.createRun("ws-1", "do work", "pi-session");
+			assert.equal(created.id, "run-1");
+			assert.equal(created.state, "queued");
+			const run = await client.getRun(created.id);
+			assert.equal(run.state, "succeeded");
+			const events = await client.runEvents(created.id, 3);
+			assert.equal(events.length, 1);
+			assert.equal(events[0]?.sequence, 4);
+			await client.cancelRun(created.id);
+		} finally {
+			await daemon.close();
+		}
+	});
+
 	it("reads workspace records", async () => {
 		const daemon = await startFakeDaemon();
 		try {

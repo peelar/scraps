@@ -15,6 +15,10 @@ Usage:
 Commands:
   new [--repo URL] [project]
                 Create a workspace, optionally cloning a repository
+  push [--replace] [<id>] <dir>
+                Copy a local directory into a workspace (ADR 0014)
+  pull [--force] [<id>] [target]
+                Copy a workspace into a local directory (ADR 0014)
   ls            List workspaces
   start <id>    Start a stopped workspace
   stop <id>     Stop a running workspace
@@ -51,6 +55,10 @@ func run(args []string) int {
 		return 0
 	case "new":
 		return runNew(rest)
+	case "push":
+		return runPush(rest)
+	case "pull":
+		return runPull(rest)
 	case "ls":
 		return runList(rest)
 	case "start", "stop":
