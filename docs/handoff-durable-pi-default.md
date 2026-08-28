@@ -73,8 +73,12 @@ loop on the laptop.
 - Detects the required runner capability.
 - Intercepts interactive prompts after `/scrap` and prevents the local agent
   loop from running.
-- Creates a durable run, saves its binding immediately, and polls events.
-- Replays assistant messages from Pi JSON events.
+- Creates a durable run, saves its binding immediately, and streams events
+  over SSE, falling back to polling against daemons without the stream
+  endpoint; both resume from the persisted sequence cursor.
+- Renders the live trace through Pi's native `AssistantMessageComponent`,
+  `ToolExecutionComponent`, and `UserMessageComponent`: streaming assistant
+  text, dimmed/collapsed thinking, and tool calls with expandable output.
 - Saves the last event cursor and closes the final-event/state race.
 - Reconnects an unfinished run during Pi session resume.
 - Fails closed when the runner is absent or cannot be verified.
@@ -142,19 +146,16 @@ closed by design.
 
 ### P1 — native Pi fidelity
 
-9. **Stream instead of polling.**
-   Add authenticated SSE or a reconnectable streaming response with sequence
-   cursors. Keep polling as a recovery path. Do not tie stream closure to run
-   cancellation.
-10. **Render complete Pi events.**
-    The initial client displays finalized assistant text. Add native-looking
-    thinking, tool call, partial tool output, usage, compaction, retry, and error
-    rendering. Preserve event IDs to prevent duplicate display after reconnect.
-11. **Remote runtime hook in Pi.**
-    Evaluate adding a Pi SDK/extension hook that replaces the agent runtime
-    while retaining the built-in TUI and session renderers. This is preferable
-    to indefinitely recreating native rendering with custom messages.
-12. **Forward native controls.**
+SSE streaming with sequence cursors (polling kept as a recovery path) and
+full-event rendering through Pi's native TUI components are implemented.
+Remaining fidelity work:
+
+8. **Remote runtime hook in Pi.**
+   Evaluate adding a Pi SDK/extension hook that replaces the agent runtime
+   while retaining the built-in TUI and session renderers. The native
+   component rendering above is a step in that direction; a true runtime
+   hook would remove the remaining custom mirror logic.
+9. **Forward native controls.**
     Model selection, thinking level, steering/follow-up messages, `/compact`,
     `/tree`, `/fork`, and `/clone` need defined remote semantics. Until then,
     unsupported controls should fail clearly rather than mutate only the local
@@ -162,44 +163,44 @@ closed by design.
 
 ### P1 — personalization and session ownership
 
-13. **Finish the versioned runner profile.**
+10. **Finish the versioned runner profile.**
     The allowlisted profile archive, integrity manifest, SSH installation,
     protected runner directory, and executable-extension exclusion are
     implemented. Add a filtered safe-settings projection, explicit extension
     allowlisting, Pi-version compatibility migrations, atomic generation
     history/rollback, and automatic drift reconciliation.
-14. **Finish authoritative remote session semantics.**
+11. **Finish authoritative remote session semantics.**
     The first accepted run now durably stores and imports the active local branch
     exactly once; the worker then retains authority. Define explicit remote
     branch/session IDs and metadata APIs instead of relying on the latest file in
     a per-client directory, and support deterministic remote branching.
-15. **Local mirror rules.**
+12. **Local mirror rules.**
     Define exactly which remote events are written into local Pi JSONL so
     `/resume`, exports, token totals, and tree navigation remain useful without
     creating two sources of truth.
-16. **Workspace switching.**
+13. **Workspace switching.**
     Decide whether one Pi conversation can move between workspaces. If allowed,
     record each binding transition remotely; otherwise create a new remote
     session when `/scrap-select` changes workspace.
 
 ### P1 — security and operations
 
-17. **Runner isolation.**
+14. **Runner isolation.**
     Run Pi under a dedicated service identity or constrained runner container,
     separate from both scrapd and OpenShell workloads. Give it only the API
     capability for its assigned workspace and run.
-18. **Per-run capabilities.**
+15. **Per-run capabilities.**
     Replace the daemon-wide bearer token inherited by Pi with short-lived,
     workspace- and run-scoped tokens. Revoke them on completion/cancellation.
-19. **Secret redaction and audit.**
+16. **Secret redaction and audit.**
     Audit JSON events, stderr, prompts, errors, and session files for credential
     leakage. Record run creator, workspace, model/provider, lifecycle, and
     cancellation without recording secrets.
-20. **Tailscale authorization.**
+17. **Tailscale authorization.**
     Keep scrapd behind Tailscale Serve HTTPS and validate ACL/tag assumptions.
     The bearer token remains defense in depth; future multi-user support needs
     an authenticated user identity rather than one shared operator token.
-21. **Backup and retention.**
+18. **Backup and retention.**
     Include remote Pi sessions and run metadata in encrypted backups. Define
     event/session retention and deletion behavior when a workspace is tossed.
 
@@ -208,8 +209,8 @@ closed by design.
 - Initial profile cloning is automatic during `scrap attach`, but profile drift
   is not yet reconciled automatically during `/scrap`. Environment- or
   keychain-command-based credentials require conversion to portable Pi auth.
-- Results are polled every 500 ms rather than streamed.
-- Only finalized assistant text is mirrored into the local TUI.
+- Usage, retry, and error events are not yet rendered in the live transcript
+  (usage is a zeroed placeholder).
 - `/scrap-cancel` cancels remotely, but Escape is not wired to it yet.
 - Steering and queued follow-up messages are not forwarded remotely.
 - A scrapd restart now marks orphaned queued/running rows failed rather than
