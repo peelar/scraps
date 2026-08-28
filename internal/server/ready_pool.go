@@ -4,14 +4,18 @@ import (
 	"context"
 	"log/slog"
 	"sync"
+	"time"
 
 	"github.com/peelar/scraps/internal/provider"
 	"github.com/peelar/scraps/internal/workspace"
 )
 
+const providerReconcileInterval = 15 * time.Minute
+
 // readyPool maintains one clean, running, unassigned provider runtime. Capacity
 // failures are intentionally non-fatal: the normal provider Create path remains
 // available and a later checkout/delete causes another replenishment attempt.
+// It also periodically asks the provider to reclaim untracked owned resources.
 type readyPool struct {
 	provider provider.Provider
 	warm     provider.Preheater
@@ -31,7 +35,7 @@ func newReadyPool(runtime provider.Provider) *readyPool {
 	ctx, cancel := context.WithCancel(context.Background())
 	p := &readyPool{provider: runtime, warm: warm, ctx: ctx, cancel: cancel}
 	p.wg.Add(1)
-	go func() { defer p.wg.Done(); p.reconcile() }()
+	go func() { defer p.wg.Done(); p.maintain() }()
 	return p
 }
 
@@ -43,7 +47,26 @@ func (p *readyPool) close() {
 	p.wg.Wait()
 }
 
+func (p *readyPool) maintain() {
+	p.reconcile()
+	ticker := time.NewTicker(providerReconcileInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-p.ctx.Done():
+			return
+		case <-ticker.C:
+			p.reconcile()
+		}
+	}
+}
+
 func (p *readyPool) reconcile() {
+	if reconciler, ok := p.provider.(provider.Reconciler); ok {
+		if err := reconciler.Reconcile(p.ctx); err != nil && p.ctx.Err() == nil {
+			slog.Warn("reconcile provider resources", "error", err)
+		}
+	}
 	ready, err := p.warm.Ready(p.ctx)
 	if err != nil {
 		slog.Warn("inspect ready pool", "error", err)

@@ -22,7 +22,10 @@ import (
 	"github.com/peelar/scraps/internal/workspace"
 )
 
-const defaultOpenShellImage = "scraps-dev:bookworm"
+const (
+	defaultOpenShellImage = "scraps-dev:bookworm"
+	scrapsWorkspaceLabel  = "dev.scraps.workspace"
+)
 
 type OpenShell struct {
 	store      *store.Store
@@ -142,7 +145,7 @@ func (o *OpenShell) Create(ctx context.Context, opt workspace.CreateOptions) (wo
 		if taken {
 			continue
 		}
-		args := []string{"sandbox", "create", "--name", id, "--from", o.image, "--cpu", "2", "--memory", "4Gi", "--label", "dev.scraps.workspace=" + id}
+		args := []string{"sandbox", "create", "--name", id, "--from", o.image, "--cpu", "2", "--memory", "4Gi", "--label", scrapsWorkspaceLabel + "=" + id}
 		// A configured provider contains the brokered credential in OpenShell;
 		// the sandbox receives only rewritten requests, never the PAT itself.
 		_, providerErr := o.run(ctx, nil, "provider", "get", githubauth.ProfileID)
@@ -188,21 +191,65 @@ func (o *OpenShell) Create(ctx context.Context, opt workspace.CreateOptions) (wo
 	}
 	return workspace.Workspace{}, errors.New("could not generate a unique workspace id")
 }
+
+type openShellSandbox struct {
+	Name   string            `json:"name"`
+	Phase  string            `json:"phase"`
+	Labels map[string]string `json:"labels"`
+}
+
+func (o *OpenShell) sandboxes(ctx context.Context) ([]openShellSandbox, error) {
+	listed, err := o.run(ctx, nil, "sandbox", "list", "--output", "json")
+	if err != nil {
+		return nil, err
+	}
+	var sandboxes []openShellSandbox
+	if err := json.Unmarshal(listed, &sandboxes); err != nil {
+		return nil, fmt.Errorf("decode openshell sandbox list: %w", err)
+	}
+	return sandboxes, nil
+}
+
+// Reconcile removes OpenShell sandboxes which are explicitly labelled as
+// Scraps-owned but no longer have a database record. Failed creates and lost
+// databases can otherwise leave running containers behind indefinitely.
+func (o *OpenShell) Reconcile(ctx context.Context) error {
+	rows, err := o.store.ListWorkspaces(ctx)
+	if err != nil {
+		return err
+	}
+	tracked := make(map[string]bool, len(rows))
+	for _, row := range rows {
+		if row.Provider == "openshell" {
+			tracked[row.ID] = true
+		}
+	}
+	sandboxes, err := o.sandboxes(ctx)
+	if err != nil {
+		return err
+	}
+	var cleanupErrors []error
+	for _, sandbox := range sandboxes {
+		// Require both the ownership label and matching value/name. Never infer
+		// ownership from OpenShell's generated Docker container name.
+		if sandbox.Labels[scrapsWorkspaceLabel] != sandbox.Name || tracked[sandbox.Name] {
+			continue
+		}
+		if _, err := o.run(ctx, nil, "sandbox", "delete", sandbox.Name); err != nil {
+			cleanupErrors = append(cleanupErrors, fmt.Errorf("delete orphaned sandbox %s: %w", sandbox.Name, err))
+		}
+	}
+	return errors.Join(cleanupErrors...)
+}
+
 func (o *OpenShell) Ready(ctx context.Context) ([]workspace.Workspace, error) {
 	rows, err := o.store.ListWorkspaces(ctx)
 	if err != nil {
 		return nil, err
 	}
-	listed, err := o.run(ctx, nil, "sandbox", "list", "--output", "json")
+	sandboxes, err := o.sandboxes(ctx)
 	if err != nil {
 		return nil, err
-	}
-	var sandboxes []struct {
-		Name  string `json:"name"`
-		Phase string `json:"phase"`
-	}
-	if err := json.Unmarshal(listed, &sandboxes); err != nil {
-		return nil, fmt.Errorf("decode openshell sandbox list: %w", err)
 	}
 	phaseByName := make(map[string]string, len(sandboxes))
 	for _, sandbox := range sandboxes {

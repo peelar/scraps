@@ -46,6 +46,13 @@ type Preheater interface {
 	Ready(context.Context) ([]workspace.Workspace, error)
 }
 
+// Reconciler is implemented by providers that own external resources which can
+// outlive scrapd. Reconcile must only remove resources carrying an unambiguous
+// Scraps ownership marker.
+type Reconciler interface {
+	Reconcile(context.Context) error
+}
+
 type Provider interface {
 	Info() Info
 	Create(context.Context, workspace.CreateOptions) (workspace.Workspace, error)

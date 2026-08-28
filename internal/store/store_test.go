@@ -19,6 +19,13 @@ func openTestStore(t *testing.T) *Store {
 	return store
 }
 
+func TestOpenSerializesSQLiteAccess(t *testing.T) {
+	store := openTestStore(t)
+	if got := store.db.Stats().MaxOpenConnections; got != 1 {
+		t.Fatalf("max open connections = %d, want 1", got)
+	}
+}
+
 func TestMigratesRunsWithoutSessionSnapshots(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "old-runs.db")
 	db, err := sql.Open("sqlite", path)

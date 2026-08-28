@@ -41,7 +41,9 @@ func Open(path string) (*Store, error) {
 		return nil, fmt.Errorf("open database: %w", err)
 	}
 
-	// modernc.org/sqlite dislikes concurrent writers; serialize access.
+	// modernc.org/sqlite dislikes concurrent writers. Keep one connection so
+	// writes are serialized and connection-local PRAGMAs apply to every query.
+	db.SetMaxOpenConns(1)
 	if _, err := db.Exec(`PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;`); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("configure database: %w", err)

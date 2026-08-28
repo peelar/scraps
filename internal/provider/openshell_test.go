@@ -130,6 +130,50 @@ exit 0
 	}
 }
 
+func TestOpenShellReconcileDeletesOnlyLabelledOrphans(t *testing.T) {
+	bin := t.TempDir()
+	logPath := filepath.Join(bin, "calls")
+	script := `#!/bin/sh
+printf '%s\n' "$*" >> "$OPENSHELL_TEST_LOG"
+if [ "$*" = "sandbox list --output json" ]; then
+  printf '%s\n' '[{"name":"tracked","phase":"Running","labels":{"dev.scraps.workspace":"tracked"}},{"name":"orphan","phase":"Running","labels":{"dev.scraps.workspace":"orphan"}},{"name":"foreign","phase":"Running","labels":{}},{"name":"mismatch","phase":"Running","labels":{"dev.scraps.workspace":"someone-else"}}]'
+fi
+`
+	if err := os.WriteFile(filepath.Join(bin, "openshell"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("OPENSHELL_TEST_LOG", logPath)
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := st.CreateWorkspace(context.Background(), store.Workspace{ID: "tracked", Provider: "openshell", State: "running"}); err != nil {
+		t.Fatal(err)
+	}
+	runtime, err := NewOpenShell(context.Background(), st, "test-image")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	calls, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(calls)
+	if !strings.Contains(got, "sandbox delete orphan\n") {
+		t.Fatalf("orphan was not deleted:\n%s", got)
+	}
+	for _, protected := range []string{"tracked", "foreign", "mismatch"} {
+		if strings.Contains(got, "sandbox delete "+protected+"\n") {
+			t.Fatalf("protected sandbox %q was deleted:\n%s", protected, got)
+		}
+	}
+}
+
 func TestReadyReclaimsStalePreheatedRecord(t *testing.T) {
 	bin := t.TempDir()
 	script := `#!/bin/sh

@@ -12,11 +12,12 @@ import (
 
 type poolProvider struct {
 	provider.Provider
-	mu       sync.Mutex
-	ready    []workspace.Workspace
-	preheats int
-	creates  int
-	deleted  []string
+	mu         sync.Mutex
+	ready      []workspace.Workspace
+	preheats   int
+	creates    int
+	reconciles int
+	deleted    []string
 }
 
 func (f *poolProvider) Create(_ context.Context, opt workspace.CreateOptions) (workspace.Workspace, error) {
@@ -32,6 +33,12 @@ func (f *poolProvider) Preheat(context.Context) (workspace.Workspace, error) {
 	w := workspace.Workspace{ID: "warm-" + string(rune('0'+f.preheats)), State: "preheated"}
 	f.ready = append(f.ready, w)
 	return w, nil
+}
+func (f *poolProvider) Reconcile(context.Context) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.reconciles++
+	return nil
 }
 func (f *poolProvider) Ready(context.Context) ([]workspace.Workspace, error) {
 	f.mu.Lock()
@@ -78,7 +85,11 @@ func TestReadyPoolPreheatsChecksOutAndReplenishes(t *testing.T) {
 	f := &poolProvider{}
 	p := newReadyPool(f)
 	defer p.close()
-	waitFor(t, func() bool { f.mu.Lock(); defer f.mu.Unlock(); return f.preheats == 1 })
+	waitFor(t, func() bool {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		return f.preheats == 1 && f.reconciles == 1
+	})
 
 	created, err := p.create(context.Background(), workspace.CreateOptions{Project: "demo"})
 	if err != nil {
